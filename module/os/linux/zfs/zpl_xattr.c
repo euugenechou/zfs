@@ -86,6 +86,9 @@
 #include <sys/zpl.h>
 #include <linux/vfs_compat.h>
 
+// Lethe stuff
+#include <lethe/log.h>
+
 enum xattr_permission {
 	XAPERM_DENY,
 	XAPERM_ALLOW,
@@ -600,6 +603,8 @@ static int
 zpl_xattr_set(struct inode *ip, const char *name, const void *value,
     size_t size, int flags)
 {
+	lethe_info("zpl_xattr_set(): %s\n", name);
+
 	znode_t *zp = ITOZ(ip);
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
 	cred_t *cr = CRED();

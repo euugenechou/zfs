@@ -64,6 +64,15 @@ extern ssize_t zpl_xattr_list(struct dentry *dentry, char *buf, size_t size);
 extern int zpl_xattr_security_init(struct inode *ip, struct inode *dip,
     const struct qstr *qstr);
 
+// Lethe: need to export function to set an xattr.
+extern int zpl_xattr_set(
+	struct inode *ip,
+	const char *name,
+	const void *value,
+	size_t size,
+	int flags
+);
+
 #if defined(CONFIG_FS_POSIX_ACL)
 
 #if defined(HAVE_SET_ACL_IDMAP_DENTRY)

@@ -72,6 +72,12 @@
 #include <sys/sa_impl.h>
 #include <linux/mm_compat.h>
 
+// Lethe stuff
+#include <sys/zfs_lethe.h>
+#include <lethe/log.h>
+#include <lethe/kht.h>
+#include <lethe/hex.h>
+
 /*
  * Programming rules.
  *
@@ -188,6 +194,9 @@ zfs_open(struct inode *ip, int mode, int flag, cred_t *cr)
 
 	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
 		return (error);
+
+	// Lethe: load/init file metadata.
+	// zfs_lethe_meta_file_new(zp, zfsvfs);
 
 	/* Honor ZFS_APPENDONLY file attribute */
 	if (blk_mode_is_open_write(mode) && (zp->z_pflags & ZFS_APPENDONLY) &&
@@ -605,6 +614,8 @@ zfs_create(znode_t *dzp, char *name, vattr_t *vap, int excl,
     int mode, znode_t **zpp, cred_t *cr, int flag, vsecattr_t *vsecp,
     zidmap_t *mnt_ns)
 {
+	lethe_info("zfs_create(): %s\n", name);
+
 	znode_t		*zp;
 	zfsvfs_t	*zfsvfs = ZTOZSB(dzp);
 	zilog_t		*zilog;
@@ -683,6 +694,9 @@ top:
 		}
 	}
 
+	// Lethe: check if new file.
+	// bool is_new_file = (zp == NULL);
+
 	if (zp == NULL) {
 		uint64_t txtype;
 		uint64_t projid = ZFS_DEFAULT_PROJID;
@@ -731,6 +745,10 @@ top:
 		fuid_dirtied = zfsvfs->z_fuid_dirty;
 		if (fuid_dirtied)
 			zfs_fuid_txhold(zfsvfs, tx);
+
+		// Lethe: acquire holds before tx is assigned.
+		// zfs_lethe_meta_txhold(zfsvfs, tx);
+
 		dmu_tx_hold_zap(tx, dzp->z_id, TRUE, name);
 		dmu_tx_hold_sa(tx, dzp->z_sa_hdl, B_FALSE);
 		if (!zfsvfs->z_use_sa &&
@@ -756,6 +774,9 @@ top:
 		}
 		zfs_mknode(dzp, vap, tx, cr, 0, &zp, &acl_ids);
 
+		// Lethe: load/initialize file metadata.
+		// zfs_lethe_meta_file_new(zp, zfsvfs);
+
 		error = zfs_link_create(dl, zp, tx, ZNEW);
 		if (error != 0) {
 			/*
@@ -771,6 +792,9 @@ top:
 
 		if (fuid_dirtied)
 			zfs_fuid_sync(zfsvfs, tx);
+
+		// Lethe: sync metadata.
+		// zfs_lethe_meta_sync(zfsvfs, tx);
 
 		txtype = zfs_log_create_txtype(Z_FILE, vsecp, vap);
 		if (flag & FIGNORECASE)
@@ -843,6 +867,37 @@ out:
 
 	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 		error = zil_commit(zilog, 0);
+
+	// Lethe: add xattr containing Base64-encoded KHT metadata.
+	// This should only apply to new ZFS plain files.
+	// if (S_ISREG(mode) && is_new_file) {
+	//      lethe_info("zfs_create(): add Lethe xattr to %s\n", name);
+
+	//      // Create new KHT metadata.
+	//      uint64_t fanouts[] = { 8, 64, 32, 16, 4 };
+	//      struct KhtMeta meta = khtmeta_new(fanouts, 5);
+
+	//      // Serialize and encode to hex.
+	//      vec(uint8_t) bytes = khtmeta_serialize(&meta);
+	//      struct Str encoded = hex_encode(&bytes);
+
+	//      // Add metadata as user extended attribute.
+	//      zpl_xattr_set(
+	//              ZTOI(zp),
+	//              "user.kht",
+	//              str_buf(&encoded),
+	//              str_len(&encoded),
+	//              XATTR_CREATE
+	//      );
+
+	//      // Setting the extended attribute should theoretically mean
+	//      // that the memory we allocated can now be dropped.
+	//      vec_drop(&bytes);
+	//      str_drop(&encoded);
+	//      khtmeta_drop(&meta);
+	// } else if (!is_new_file) {
+	//      lethe_info("zfs_create(): %s already exists\n", name);
+	// }
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -926,6 +981,10 @@ top:
 	fuid_dirtied = zfsvfs->z_fuid_dirty;
 	if (fuid_dirtied)
 		zfs_fuid_txhold(zfsvfs, tx);
+
+	// Lethe: Acquire holds before transaction is assigned.
+	// zfs_lethe_meta_txhold(zfsvfs, tx);
+
 	if (!zfsvfs->z_use_sa &&
 	    acl_ids.z_aclp->z_acl_bytes > ZFS_ACE_SPACE) {
 		dmu_tx_hold_write(tx, DMU_NEW_OBJECT,
@@ -949,6 +1008,9 @@ top:
 
 	if (fuid_dirtied)
 		zfs_fuid_sync(zfsvfs, tx);
+
+	// Lethe: sync metadata.
+	// zfs_lethe_meta_sync(zfsvfs, tx);
 
 	/* Add to unlinked set */
 	zp->z_unlinked = B_TRUE;
@@ -1335,6 +1397,10 @@ top:
 	fuid_dirtied = zfsvfs->z_fuid_dirty;
 	if (fuid_dirtied)
 		zfs_fuid_txhold(zfsvfs, tx);
+
+	// Lethe: Acquire holds before transaction is assigned.
+	// zfs_lethe_meta_txhold(zfsvfs, tx);
+
 	if (!zfsvfs->z_use_sa && acl_ids.z_aclp->z_acl_bytes > ZFS_ACE_SPACE) {
 		dmu_tx_hold_write(tx, DMU_NEW_OBJECT, 0,
 		    acl_ids.z_aclp->z_acl_bytes);
@@ -1376,6 +1442,9 @@ top:
 
 	if (fuid_dirtied)
 		zfs_fuid_sync(zfsvfs, tx);
+
+	// Lethe: sync metadata.
+	// zfs_lethe_meta_sync(zfsvfs, tx);
 
 	*zpp = zp;
 
@@ -2390,6 +2459,9 @@ top:
 	if (fuid_dirtied)
 		zfs_fuid_txhold(zfsvfs, tx);
 
+	// Lethe: Acquire holds before transaction is assigned.
+	// zfs_lethe_meta_txhold(zfsvfs, tx);
+
 	zfs_sa_upgrade_txholds(tx, zp);
 
 	err = dmu_tx_assign(tx, DMU_TX_WAIT);
@@ -2585,6 +2657,9 @@ top:
 
 	if (fuid_dirtied)
 		zfs_fuid_sync(zfsvfs, tx);
+
+	// Lethe: sync metadata.
+	// zfs_lethe_meta_sync(zfsvfs, tx);
 
 	if (mask != 0) {
 		zfs_log_setattr(zilog, tx, TX_SETATTR, zp, vap, mask, fuidp);
@@ -3387,6 +3462,10 @@ top:
 	}
 	if (fuid_dirtied)
 		zfs_fuid_txhold(zfsvfs, tx);
+
+	// Lethe: Acquire holds before transaction is assigned.
+	// zfs_lethe_meta_txhold(zfsvfs, tx);
+
 	error = dmu_tx_assign(tx,
 	    (waited ? DMU_TX_NOTHROTTLE : 0) | DMU_TX_NOWAIT);
 	if (error) {
@@ -3411,6 +3490,9 @@ top:
 
 	if (fuid_dirtied)
 		zfs_fuid_sync(zfsvfs, tx);
+
+	// Lethe: sync metadata.
+	// zfs_lethe_meta_sync(zfsvfs, tx);
 
 	mutex_enter(&zp->z_lock);
 	if (zp->z_is_sa)
@@ -4039,11 +4121,17 @@ zfs_dirty_inode(struct inode *ip, int flags)
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 	zfs_sa_upgrade_txholds(tx, zp);
 
+	// Lethe: acquire holds for file metadata.
+	// zfs_lethe_meta_file_txhold(zp, tx);
+
 	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		goto out;
 	}
+
+	// Lethe: sync out the file metadata.
+	// zfs_lethe_meta_file_sync(zp, zfsvfs, tx);
 
 	mutex_enter(&zp->z_lock);
 	zp->z_atime_dirty = B_FALSE;

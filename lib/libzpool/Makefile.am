@@ -6,6 +6,11 @@ libzpool_la_CPPFLAGS  = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
 libzpool_la_CPPFLAGS += -I$(srcdir)/include/os/@ac_system_l@/zfs
 libzpool_la_CPPFLAGS += -DLIB_ZPOOL_BUILD
 
+# Lethe: gcc really doesn't like the `Vec` implementation.
+AM_CFLAGS += -Wno-error=stringop-overflow
+AM_CFLAGS += -Wno-stringop-overflow
+AM_CFLAGS += -Wno-maybe-uninitialized
+
 lib_LTLIBRARIES += libzpool.la
 CPPCHECKTARGETS += libzpool.la
 
@@ -192,7 +197,35 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/zio_inject.c \
 	module/zfs/zle.c \
 	module/zfs/zrlock.c \
-	module/zfs/zthr.c
+	module/zfs/zthr.c \
+	\
+	module/zfs/btreemap.c \
+	module/zfs/btreemap_iter.c \
+	module/zfs/btreemap_node.c \
+	module/zfs/btreeset.c \
+	module/zfs/btreeset_iter.c \
+	module/zfs/btreeset_node.c \
+	module/zfs/hashmap.c \
+	module/zfs/hashmap_iter.c \
+	module/zfs/hashmap_list.c \
+	module/zfs/hashmap_list_iter.c \
+	module/zfs/hashmap_node.c \
+	module/zfs/hex.c \
+	module/zfs/kht_coverage.c \
+	module/zfs/kht_erl.c \
+	module/zfs/kht_forest.c \
+	module/zfs/kht_key.c \
+	module/zfs/kht_path.c \
+	module/zfs/kht_pos.c \
+	module/zfs/kht_range.c \
+	module/zfs/kht_root.c \
+	module/zfs/kht_shape.c \
+	module/zfs/kht_tree.c \
+	module/zfs/lethe.c \
+	module/zfs/sha.c \
+	module/zfs/speck.c \
+	module/zfs/str.c \
+	module/zfs/zfs_lethe.c
 
 libzpool_la_LIBADD = \
 	libicp.la \

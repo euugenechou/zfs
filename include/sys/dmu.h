@@ -418,6 +418,11 @@ typedef struct dmu_buf {
 #define	DMU_POOL_TXG_LOG_TIME_DAYS	"com.klarasystems:txg_log_time:days"
 #define	DMU_POOL_TXG_LOG_TIME_MONTHS	"com.klarasystems:txg_log_time:months"
 
+// Lethe stuff
+#define DMU_POOL_LETHE_SYS_META         "lethe_system_metadata"
+#define DMU_POOL_MASTER_KHTSTORE        "lethe_master_khtstore"
+#define DMU_POOL_OBJECT_KHTSTORE        "lethe_object_khtstore"
+
 /*
  * Allocate an object from this objset.  The range of object numbers
  * available is (0, DN_MAX_OBJECT).  Object 0 is the meta-dnode.

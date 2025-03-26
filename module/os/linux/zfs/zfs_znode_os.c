@@ -64,6 +64,10 @@
 #include "zfs_prop.h"
 #include "zfs_comutil.h"
 
+// Lethe stuff
+#include <lethe/log.h>
+#include <lethe/kht.h>
+
 static kmem_cache_t *znode_cache = NULL;
 static kmem_cache_t *znode_hold_cache = NULL;
 unsigned int zfs_object_mutex_size = ZFS_OBJ_MTX_SZ;
@@ -128,6 +132,14 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 	zp->z_xattr_cached = NULL;
 	zp->z_xattr_parent = 0;
 
+	// Lethe: zero out file metadata and initialize the lock.
+	// The `KhtMeta` is initialized/loaded when a file is read.
+	// TODO: which file?
+	zp->lethe_meta_obj = 0;
+	zp->lethe_meta_size = 0;
+	zp->lethe_meta_loaded = B_FALSE;
+	rw_init(&zp->lethe_meta_lock, NULL, RW_DEFAULT, NULL);
+
 	return (0);
 }
 
@@ -148,6 +160,9 @@ zfs_znode_cache_destructor(void *buf, void *arg)
 	ASSERT0P(zp->z_dirlocks);
 	ASSERT0P(zp->z_acl_cached);
 	ASSERT0P(zp->z_xattr_cached);
+
+	// Lethe: destroy the lock.
+	rw_destroy(&zp->lethe_meta_lock);
 }
 
 static int
@@ -665,6 +680,8 @@ void
 zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
     uint_t flag, znode_t **zpp, zfs_acl_ids_t *acl_ids)
 {
+	// lethe_info("zfs_mknode()\n");
+
 	uint64_t	crtime[2], atime[2], mtime[2], ctime[2];
 	uint64_t	mode, size, links, parent, pflags;
 	uint64_t	projid = ZFS_DEFAULT_PROJID;

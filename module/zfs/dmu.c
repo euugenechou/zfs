@@ -63,6 +63,9 @@
 #include <sys/zfs_znode.h>
 #endif
 
+// Lethe stuff
+#include <lethe/log.h>
+
 /*
  * Enable/disable nopwrite feature.
  */
@@ -641,8 +644,10 @@ dmu_buf_hold_array(objset_t *os, uint64_t object, uint64_t offset,
 	int err;
 
 	err = dnode_hold(os, object, FTAG, &dn);
-	if (err)
+	if (err) {
+		lethe_info("dnode_hold(): object not held");
 		return (err);
+	}
 
 	err = dmu_buf_hold_array_by_dnode(dn, offset, length, read, tag,
 	    numbufsp, dbpp, flags);

@@ -68,6 +68,10 @@
 #include <sys/qat.h>
 #include <sys/zstd/zstd.h>
 
+// Lethe stuff
+#include <lethe/log.h>
+#include <lethe/btreemap.h>
+
 /*
  * SPA locking
  *
@@ -877,6 +881,10 @@ spa_add(const char *name, nvlist_t *config, const char *altroot)
 	list_create(&spa->spa_leaf_list, sizeof (vdev_t),
 	    offsetof(vdev_t, vdev_leaf_node));
 
+	// Lethe: Initialize system metadata and protecting lock.
+	// mutex_init(&spa->lethe_sys_meta_lock, NULL, MUTEX_DEFAULT, NULL);
+	// spa->lethe_sys_meta = btreemap_new();
+
 	return (spa);
 }
 
@@ -961,6 +969,10 @@ spa_remove(spa_t *spa)
 	mutex_destroy(&spa->spa_feat_stats_lock);
 	mutex_destroy(&spa->spa_activities_lock);
 	mutex_destroy(&spa->spa_txg_log_time_lock);
+
+	// Lethe: free system-wide metadata.
+	// mutex_destroy(&spa->lethe_sys_meta_lock);
+	// btreemap_drop(&spa->lethe_sys_meta);
 
 	kmem_free(spa, sizeof (spa_t));
 }

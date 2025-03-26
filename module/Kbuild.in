@@ -442,7 +442,36 @@ ZFS_OBJS := \
 	zle.o \
 	zrlock.o \
 	zthr.o \
-	zvol.o
+	zvol.o \
+	\
+	zfs_lethe.o \
+	base64.o \
+	btreemap.o \
+	btreemap_iter.o \
+	btreemap_node.o \
+	btreeset.o \
+	btreeset_iter.o \
+	btreeset_node.o \
+	hashmap.o \
+	hashmap_iter.o \
+	hashmap_list.o \
+	hashmap_list_iter.o \
+	hashmap_node.o \
+	hex.o \
+	kht_coverage.o \
+	kht_erl.o \
+	kht_forest.o \
+	kht_key.o \
+	kht_path.o \
+	kht_pos.o \
+	kht_range.o \
+	kht_root.o \
+	kht_shape.o \
+	kht_tree.o \
+	lethe.o \
+	sha.o \
+	speck.o \
+	str.o
 
 ZFS_OBJS_OS := \
 	abd_os.o \

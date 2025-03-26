@@ -105,6 +105,11 @@
 #include "zfs_comutil.h"
 #include <cityhash.h>
 
+// Lethe
+#include <lethe/log.h>
+#include <lethe/btreemap.h>
+#include <lethe/hex.h>
+
 /*
  * spa_thread() existed on Illumos as a parent thread for the various worker
  * threads that actually run the pool, as a way to both reference the entire
@@ -1853,6 +1858,9 @@ spa_activate(spa_t *spa, spa_mode_t mode)
 
 	spa_keystore_init(&spa->spa_keystore);
 
+	// Lethe: initialize in-memory structures.
+	lethe_init(spa);
+
 	/*
 	 * This taskq is used to perform zvol-minor-related tasks
 	 * asynchronously. This has several advantages, including easy
@@ -1976,6 +1984,9 @@ spa_deactivate(spa_t *spa)
 	avl_destroy(&spa->spa_errlist_healed);
 
 	spa_keystore_fini(&spa->spa_keystore);
+
+	// Lethe: destroy in-memory structures.
+	lethe_fini(spa);
 
 	spa->spa_state = POOL_STATE_UNINITIALIZED;
 
@@ -6031,6 +6042,9 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, const char **ereport)
 	if (error != 0)
 		goto fail;
 
+	// Lethe: load on-disk structures.
+	lethe_load(spa);
+
 	/*
 	 * Retrieve the mapping of indirect vdevs. Those vdevs were removed
 	 * from the pool and their contents were re-mapped to other vdevs. Note
@@ -7015,6 +7029,8 @@ int
 spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
     nvlist_t *zplprops, dsl_crypto_params_t *dcp)
 {
+	// lethe_info("spa_create(): %s\n", pool);
+
 	spa_t *spa;
 	const char *altroot = NULL;
 	vdev_t *rvd;
@@ -7247,6 +7263,9 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	    sizeof (uint64_t), 1, &version, tx) != 0) {
 		cmn_err(CE_PANIC, "failed to add pool version");
 	}
+
+	// Lethe: allocate master/object ERL maps.
+	lethe_setup(spa, tx);
 
 	/* Newly created pools with the right version are always deflated. */
 	if (version >= SPA_VERSION_RAIDZ_DEFLATE) {
@@ -10641,6 +10660,10 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 		    ZPOOL_CONFIG_SPARES, DMU_POOL_SPARES);
 		spa_sync_aux_dev(spa, &spa->spa_l2cache, tx,
 		    ZPOOL_CONFIG_L2CACHE, DMU_POOL_L2CACHE);
+
+		// Lethe: sync in-memory structures to disk.
+		lethe_sync(spa, tx);
+
 		spa_errlog_sync(spa, txg);
 		dsl_pool_sync(dp, txg);
 
@@ -10798,6 +10821,8 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
 void
 spa_sync(spa_t *spa, uint64_t txg)
 {
+	// lethe_info("spa_sync()\n");
+
 	vdev_t *vd = NULL;
 
 	VERIFY(spa_writeable(spa));

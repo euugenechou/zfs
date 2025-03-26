@@ -41,6 +41,9 @@
 #include <sys/trace_zfs.h>
 #include <sys/zfs_project.h>
 
+// Lethe stuff
+#include <lethe/log.h>
+
 dnode_stats_t dnode_stats = {
 	{ "dnode_hold_dbuf_hold",		KSTAT_DATA_UINT64 },
 	{ "dnode_hold_dbuf_read",		KSTAT_DATA_UINT64 },
@@ -1706,6 +1709,7 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 		dnode_set_slots(dnc, idx + 1, slots - 1, DN_SLOT_INTERIOR);
 		DNODE_STAT_BUMP(dnode_hold_free_hits);
 	} else {
+		// lethe_info("dnode_hold_impl(): object not allocated or free\n");
 		dbuf_rele(db, FTAG);
 		return (SET_ERROR(EINVAL));
 	}

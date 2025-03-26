@@ -40,6 +40,9 @@
 #include <sys/zfs_ioctl.h>
 #include <sys/objlist.h>
 
+// Lethe stuff
+#include <lethe/kht.h>
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -139,6 +142,13 @@ struct zfsvfs {
 	avl_tree_t	*z_hold_trees;	/* znode hold trees */
 	kmutex_t	*z_hold_locks;	/* znode hold locks */
 	taskqid_t	z_drain_task;	/* task id for the unlink drain task */
+
+	// Lethe stuff
+	uint64_t lethe_meta_obj;        // Metadata object.
+	krwlock_t lethe_meta_lock;      // Metadata lock.
+	uint64_t lethe_meta_size;       // Serialized metadata size.
+	struct Erl lethe_meta;  	// Metadata structure.
+	boolean_t lethe_meta_loaded;    // If metadata was loaded.
 };
 
 #define	ZFS_TEARDOWN_INIT(zfsvfs)		\

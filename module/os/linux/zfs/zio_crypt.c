@@ -29,6 +29,9 @@
 #include <sys/hkdf.h>
 #include <sys/qat.h>
 
+// Lethe stuff
+#include <lethe/log.h>
+
 /*
  * This file is responsible for handling all of the details of generating
  * encryption parameters and performing encryption and authentication.
@@ -223,6 +226,8 @@ zio_crypt_key_destroy(zio_crypt_key_t *key)
 int
 zio_crypt_key_init(uint64_t crypt, zio_crypt_key_t *key)
 {
+	// lethe_info("zio_crypt_key_init()\n");
+
 	int ret;
 	crypto_mechanism_t mech = {0};
 	uint_t keydata_len;
@@ -489,6 +494,8 @@ int
 zio_crypt_key_wrap(crypto_key_t *cwkey, zio_crypt_key_t *key, uint8_t *iv,
     uint8_t *mac, uint8_t *keydata_out, uint8_t *hmac_keydata_out)
 {
+	// lethe_info("zio_crypt_key_wrap()\n");
+
 	int ret;
 	zfs_uio_t puio, cuio;
 	uint64_t aad[3];
@@ -559,6 +566,8 @@ zio_crypt_key_unwrap(crypto_key_t *cwkey, uint64_t crypt, uint64_t version,
     uint64_t guid, uint8_t *keydata, uint8_t *hmac_keydata, uint8_t *iv,
     uint8_t *mac, zio_crypt_key_t *key)
 {
+	// lethe_info("zio_crypt_key_unwrap()\n");
+
 	crypto_mechanism_t mech;
 	zfs_uio_t puio, cuio;
 	uint64_t aad[3];
@@ -1914,6 +1923,16 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
     uint8_t *mac, uint_t datalen, uint8_t *plainbuf, uint8_t *cipherbuf,
     boolean_t *no_crypt)
 {
+	// if (encrypt && plainbuf[0] == 'h') {
+	//      lethe_info("encrypting data: [");
+	//      for (uint_t i = 0; i < datalen; i += 1) {
+	//              if (plainbuf[i] && plainbuf[i] != '\n') {
+	//                      lethe_cont("%c", (char)plainbuf[i]);
+	//              }
+	//      }
+	//      lethe_cont("]\n");
+	// }
+
 	int ret;
 	boolean_t locked = B_FALSE;
 	uint64_t crypt = key->zk_crypt;

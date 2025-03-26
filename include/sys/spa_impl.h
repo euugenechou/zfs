@@ -57,6 +57,12 @@
 
 #include "zfs_crrd.h"
 
+// Lethe stuff
+#include <sys/nvpair.h>
+#include <lethe/lethe.h>
+#include <lethe/log.h>
+#include <lethe/kht.h>
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -450,6 +456,37 @@ struct spa {
 	uint64_t	spa_errata;		/* errata issues detected */
 	spa_stats_t	spa_stats;		/* assorted spa statistics */
 	spa_keystore_t	spa_keystore;		/* loaded crypto keys */
+
+        // Lethe: general fields.
+	uint64_t lethe_root_object;             // Root object.
+        boolean_t lethe_root_object_loaded;     // Root object loaded?
+        boolean_t lethe_epoch_dirty;            // Epoch modifications to sync?
+
+	// Lethe: uber ERL fields
+	uint64_t lethe_uber_erl_object;         // On-disk uber ERL object.
+	boolean_t lethe_uber_erl_loaded;        // Was uber ERL loaded?
+	krwlock_t lethe_uber_erl_lock;          // Lock for uber ERL.
+	struct Erl lethe_uber_erl;              // In-memory uber ERL.
+
+	// Lethe: master ERL map fields
+	uint64_t lethe_master_erlmap_object;    // On-disk master ERL map object.
+	boolean_t lethe_master_erlmap_loaded;   // Was master ERL map loaded?
+	krwlock_t lethe_master_erlmap_lock;     // Lock for master ERL map.
+	nvlist_t *lethe_master_erlmap;          // In-memory master ERL map.
+
+	// Lethe: object ERL map fields
+	uint64_t lethe_object_erlmap_object;    // On-disk object ERL map object.
+	boolean_t lethe_object_erlmap_loaded;   // Was object ERL map loaded?
+	krwlock_t lethe_object_erlmap_lock;     // Lock for object ERL map.
+	nvlist_t *lethe_object_erlmap;          // In-memory object ERL map.
+
+	// Lethe: master ERL store fields
+	krwlock_t lethe_master_erlstore_lock;   // Lock for master ERL store.
+	struct BTreeMap lethe_master_erlstore;  // In-memory master ERL store.
+
+	// Lethe: object ERL store fields
+	krwlock_t lethe_object_erlstore_lock;   // Lock for object ERL store.
+	struct HashMap lethe_object_erlstore;   // In-memory object ERL store.
 
 	/* arc_memory_throttle() parameters during low memory condition */
 	uint64_t	spa_lowmem_page_load;	/* memory load during txg */

@@ -65,6 +65,10 @@
 #include <linux/fs.h>
 #include "zfs_comutil.h"
 
+// Lethe stuff
+#include <sys/zfs_lethe.h>
+#include <lethe/log.h>
+
 vfs_t *
 zfsvfs_vfs_alloc(void)
 {
@@ -603,6 +607,24 @@ zfsvfs_init(zfsvfs_t *zfsvfs, objset_t *os)
 	else if (error != 0)
 		return (error);
 
+	// Lethe: lookup metadata.
+	error = zap_lookup(
+	        os,
+	        MASTER_NODE_OBJ,
+	        ZFS_LETHE_METADATA,
+	        sizeof(uint64_t),
+	        1,
+	        &zfsvfs->lethe_meta_obj
+	);
+	if (error == ENOENT) {
+	        zfsvfs->lethe_meta_obj = 0;
+	} else if (error != 0) {
+	        return error;
+	}
+
+	// Lethe: initialize metadata (if not already loaded).
+	zfs_lethe_meta_new(zfsvfs);
+
 	error = zap_lookup(os, MASTER_NODE_OBJ, ZFS_SHARES_DIR, 8, 1,
 	    &zfsvfs->z_shares_dir);
 	if (error == ENOENT)
@@ -663,6 +685,9 @@ zfsvfs_create_impl(zfsvfs_t **zfvp, zfsvfs_t *zfsvfs, objset_t *os)
 	ZFS_TEARDOWN_INIT(zfsvfs);
 	rw_init(&zfsvfs->z_teardown_inactive_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&zfsvfs->z_fuid_lock, NULL, RW_DEFAULT, NULL);
+
+	// Lethe: initialize metadata lock.
+	// rw_init(&zfsvfs->lethe_meta_lock, NULL, RW_DEFAULT, NULL);
 
 	int size = MIN(1 << (highbit64(zfs_object_mutex_size) - 1),
 	    ZFS_OBJ_MTX_MAX);
@@ -799,6 +824,10 @@ zfsvfs_free(zfsvfs_t *zfsvfs)
 	int i, size = zfsvfs->z_hold_size;
 
 	zfs_fuid_destroy(zfsvfs);
+
+	// Lethe: drop metadata.
+	// zfs_lethe_meta_drop(zfsvfs);
+	// rw_destroy(&zfsvfs->lethe_meta_lock);
 
 	mutex_destroy(&zfsvfs->z_znodes_lock);
 	mutex_destroy(&zfsvfs->z_lock);

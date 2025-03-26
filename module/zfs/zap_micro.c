@@ -44,6 +44,9 @@
 #include <sys/sunddi.h>
 #endif
 
+// Lethe stuff
+#include <lethe/log.h>
+
 /*
  * The maximum size (in bytes) of a microzap before it is converted to a
  * fatzap. It will be rounded up to next multiple of 512 (SPA_MINBLOCKSIZE).
@@ -942,6 +945,7 @@ uint64_t
 zap_create(objset_t *os, dmu_object_type_t ot,
     dmu_object_type_t bonustype, int bonuslen, dmu_tx_t *tx)
 {
+	// lethe_info("zap_create()");
 	return (zap_create_norm(os, 0, ot, bonustype, bonuslen, tx));
 }
 

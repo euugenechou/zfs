@@ -61,6 +61,10 @@
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_znode.h>
 
+// Lethe stuff
+#include <sys/zfs_lethe.h>
+#include <lethe/log.h>
+
 /*
  * Enables access to the block cloning feature. If this setting is 0, then even
  * if feature@block_cloning is enabled, using functions and system calls that
@@ -328,6 +332,9 @@ out:
 int
 zfs_read(struct znode *zp, zfs_uio_t *uio, int ioflag, cred_t *cr)
 {
+	// struct inode *ip = ZTOI(zp);
+	// lethe_info("zfs_read(): ino=%lu\n", ip->i_ino);
+
 	(void) cr;
 	int error = 0;
 	boolean_t frsync = B_FALSE;

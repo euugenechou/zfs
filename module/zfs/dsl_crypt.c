@@ -29,6 +29,10 @@
 #include <sys/dmu_objset.h>
 #include <sys/zvol.h>
 
+// Lethe stuff
+#include <lethe/lethe.h>
+#include <lethe/log.h>
+
 /*
  * This file's primary purpose is for managing master encryption keys in
  * memory and on disk. For more info on how these keys are used, see the
@@ -551,6 +555,7 @@ dsl_crypto_key_free(dsl_crypto_key_t *dck)
 static void
 dsl_crypto_key_rele(dsl_crypto_key_t *dck, const void *tag)
 {
+	// lethe_info("dsl_crypto_key_rele()\n");
 	if (zfs_refcount_remove(&dck->dck_holds, tag) == 0)
 		dsl_crypto_key_free(dck);
 }
@@ -559,6 +564,8 @@ static int
 dsl_crypto_key_open(objset_t *mos, dsl_wrapping_key_t *wkey,
     uint64_t dckobj, const void *tag, dsl_crypto_key_t **dck_out)
 {
+	// lethe_info("dsl_crypto_key_open()\n");
+
 	int ret;
 	uint64_t crypt = 0, guid = 0, version = 0;
 	uint8_t raw_keydata[MASTER_KEY_MAX_LEN];
@@ -1232,6 +1239,8 @@ dsl_crypto_key_sync_impl(objset_t *mos, uint64_t dckobj, uint64_t crypt,
 static void
 dsl_crypto_key_sync(dsl_crypto_key_t *dck, dmu_tx_t *tx)
 {
+	// lethe_info("dsl_crypto_key_sync()\n");
+
 	zio_crypt_key_t *key = &dck->dck_key;
 	dsl_wrapping_key_t *wkey = dck->dck_wkey;
 	uint8_t keydata[MASTER_KEY_MAX_LEN];
@@ -2809,6 +2818,16 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
     uint8_t *iv, uint8_t *mac, uint_t datalen, abd_t *pabd, abd_t *cabd,
     boolean_t *no_crypt)
 {
+	// lethe_info(
+	//      "spa_do_crypt_abd(): zbookmark {\n"
+	//      "    objset: %llu\n"
+	//      "    object: %llu\n"
+	//      "    level: %lld\n"
+	//      "    blkid: %llu\n"
+	//      "}\n",
+	//      zb->zb_objset, zb->zb_object, zb->zb_level, zb->zb_blkid
+	// );
+
 	int ret;
 	dsl_crypto_key_t *dck = NULL;
 	uint8_t *plainbuf = NULL, *cipherbuf = NULL;
@@ -2821,6 +2840,19 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
 		ret = SET_ERROR(EACCES);
 		return (ret);
 	}
+
+	// Lethe: don't hijack keys for these objects due to KHT fragmentation.
+	// TODO: figure out how to make this work.
+	if (
+	        zb->zb_object != DMU_USERUSED_OBJECT &&
+	        zb->zb_object != DMU_GROUPUSED_OBJECT &&
+	        zb->zb_object != DMU_PROJECTUSED_OBJECT
+	) {
+	        // Lethe: hijack the DSL crypto key used by ZFS.
+	        struct KhtKey key = lethe_bookmark_key(spa, !encrypt, zb);
+	        lethe_hijack_dsl_crypto_key(dck, &key);
+	}
+
 
 	if (encrypt) {
 		plainbuf = abd_borrow_buf_copy(pabd, datalen);

@@ -32,6 +32,9 @@
 #include <sys/zil.h>
 #include <sys/zfs_project.h>
 
+// Lethe stuff
+#include <lethe/kht.h>
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -141,6 +144,9 @@ extern "C" {
 #define	ZFS_SHARES_DIR		"SHARES"
 #define	ZFS_SA_ATTRS		"SA_ATTRS"
 
+// Lethe stuff
+#define ZFS_LETHE_METADATA      "LETHE_METADATA"
+
 /*
  * Convert mode bits (zp_mode) to BSD-style DT_* values for storing in
  * the directory entries.  On Linux systems this value is already
@@ -210,6 +216,13 @@ typedef struct znode {
 	uint64_t	z_projid;	/* project ID */
 	list_node_t	z_link_node;	/* all znodes in fs link */
 	sa_handle_t	*z_sa_hdl;	/* handle to sa data */
+
+	// Lethe stuff
+	struct Erl lethe_meta;  	// Metadata structure.
+	krwlock_t lethe_meta_lock;      // Metadata lock.
+	uint64_t lethe_meta_obj;        // Metadata object.
+	uint64_t lethe_meta_size;       // Serialized metadata size.
+	boolean_t lethe_meta_loaded;    // If metadata was loaded.
 
 	/*
 	 * Platform specific field, defined by each platform and only
