@@ -599,7 +599,7 @@ zpl_xattr_set_sa(struct inode *ip, const char *name, const void *value,
 	return (error);
 }
 
-static int
+int
 zpl_xattr_set(struct inode *ip, const char *name, const void *value,
     size_t size, int flags)
 {
