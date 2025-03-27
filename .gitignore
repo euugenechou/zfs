@@ -88,3 +88,6 @@ changelog
 *.orig
 *.tmp
 *.log
+
+# Lethe stuff
+!install.sh
