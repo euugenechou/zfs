@@ -248,6 +248,12 @@ BTREEMAP_VAL_TYPE btreemapnode_max_val(struct BTreeMapNode *self) {
     return self->vals[vec_len(&self->vals) - 1];
 }
 
+
+// This function exceeds the frame size with --enable-debug.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wframe-larger-than="
+#endif
 void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree) {
     BTREEMAP_VAL_TYPE val;
     uint64_t i = btreemapnode_find_index(self, key);
@@ -411,3 +417,6 @@ void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint6
 
     btreemapnode_delete(&self->children[i], key, degree);
 }
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
