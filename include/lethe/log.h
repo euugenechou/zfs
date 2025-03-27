@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(DEBUG)
     #include <linux/printk.h>
     #include <linux/string.h>
 
