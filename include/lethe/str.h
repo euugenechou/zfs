@@ -23,8 +23,6 @@ char *str_buf(struct Str *self);
 
 size_t str_len(struct Str *self);
 
-bool str_is_empty(struct Str *self);
-
 size_t str_capacity(struct Str *self);
 
 int str_reserve(struct Str *self, size_t additional);

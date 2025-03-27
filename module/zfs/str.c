@@ -58,10 +58,6 @@ size_t str_len(struct Str *self) {
     return self->len;
 }
 
-bool str_is_empty(struct Str *self) {
-    return self->len == 0;
-}
-
 size_t str_capacity(struct Str *self) {
     return self->cap;
 }
@@ -105,7 +101,7 @@ int str_push(struct Str *self, char c) {
 }
 
 int str_pop(struct Str *self, char *c) {
-    if (str_is_empty(self)) {
+    if (str_len(self) == 0) {
         return -EFAULT;
     }
     self->len -= 1;
@@ -151,7 +147,6 @@ EXPORT_SYMBOL(str_from_raw);
 EXPORT_SYMBOL(str_clone);
 EXPORT_SYMBOL(str_buf);
 EXPORT_SYMBOL(str_len);
-EXPORT_SYMBOL(str_is_empty);
 EXPORT_SYMBOL(str_capacity);
 EXPORT_SYMBOL(str_reserve);
 EXPORT_SYMBOL(str_clear);
