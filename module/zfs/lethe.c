@@ -1396,11 +1396,14 @@ uint64_t __lethe_alloc_object(
 	// We shouldn't "allocate" anything if the root object isn't allocated.
 	VERIFY(spa->lethe_root_object != 0);
 
-	// Allocate new object, using maximum block size.
+	// Allocate new object. The block size must not exceed
+	// SPA_OLD_MAXBLOCKSIZE: these objects live in the MOS, and
+	// dsl_scan_visitbp() asserts that larger blocks only appear inside
+	// datasets (ds != NULL), so a scrub NULL-derefs on a bigger MOS block.
 	uint64_t object = dmu_object_alloc(
 		spa->spa_meta_objset,
 		object_type,
-		spa_maxblocksize(spa),
+		SPA_OLD_MAXBLOCKSIZE,
 		bonus_type,
 		sizeof(uint64_t),
 		tx
