@@ -74,6 +74,10 @@ struct KhtKey erl_block_read_key(struct Erl *self, uint64_t block) {
     }
 }
 
+struct KhtKey erl_block_prev_key(struct Erl *self, uint64_t block) {
+    return khf_leaf_key(&self->forest, block);
+}
+
 void erl_overwrite(struct Erl *self, uint64_t start, uint64_t end) {
     self->blocks = max(self->blocks, end);
     // A consolidated forest doesn't know its own extent; prime it with the
@@ -246,6 +250,7 @@ EXPORT_SYMBOL(erl_all_modified);
 EXPORT_SYMBOL(erl_mark_block);
 EXPORT_SYMBOL(erl_block_write_key);
 EXPORT_SYMBOL(erl_block_read_key);
+EXPORT_SYMBOL(erl_block_prev_key);
 EXPORT_SYMBOL(erl_overwrite);
 EXPORT_SYMBOL(erl_truncate);
 EXPORT_SYMBOL(erl_consolidate);

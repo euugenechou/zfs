@@ -443,6 +443,15 @@ struct KhtKey lethe_bookmark_key(
 	const zbookmark_phys_t *bookmark
 );
 
+/// The previous-epoch (forest) key for the block named by `bookmark`, for
+/// decrypting a block version that predates the current epoch's rewrite of
+/// the same blkid. Returns a random (never-matching) key if the block's ERL
+/// is not resident.
+struct KhtKey lethe_bookmark_prev_key(
+	spa_t *spa,
+	const zbookmark_phys_t *bookmark
+);
+
 /// Generates a block read key from the object ERL store in the `spa` if `read`
 /// is true, otherwise it generates a block write key. The block the key is
 /// designated for is identified by object set ID (`objset`), object ID

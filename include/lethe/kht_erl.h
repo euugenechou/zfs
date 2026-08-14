@@ -46,6 +46,11 @@ struct KhtKey erl_block_write_key(struct Erl *self, uint64_t block);
 
 struct KhtKey erl_block_read_key(struct Erl *self, uint64_t block);
 
+/// The block's key from the previous epoch (its forest key), even if the
+/// block has been re-marked in the current epoch. Used to decrypt a block
+/// version that predates the current epoch's rewrite of the same block.
+struct KhtKey erl_block_prev_key(struct Erl *self, uint64_t block);
+
 void erl_overwrite(struct Erl *self, uint64_t start, uint64_t end);
 
 void erl_truncate(struct Erl *self, uint64_t blocks);

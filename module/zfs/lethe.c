@@ -1230,6 +1230,43 @@ struct KhtKey lethe_bookmark_key(
 	return key;
 }
 
+struct KhtKey lethe_bookmark_prev_key(
+	spa_t *spa,
+	const zbookmark_phys_t *bookmark
+) {
+	// Previous-epoch key for a block that has already been re-marked by a
+	// concurrent rewrite of the same blkid: the on-disk ciphertext being
+	// decrypted may still be the pre-rewrite version, which was encrypted
+	// with the forest (folded) key rather than the current tree key.
+	fstrans_cookie_t cookie = spl_fstrans_mark();
+
+	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+
+	struct KhtKey key = khtkey_new();
+	struct Erl *erl = __lethe_get_object_erl(
+		spa,
+		bookmark->zb_objset,
+		bookmark->zb_object
+	);
+	if (erl != NULL) {
+		key = erl_block_prev_key(erl, bookmark->zb_blkid);
+	}
+
+	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+
+	spl_fstrans_unmark(cookie);
+
+	return key;
+}
+
 struct KhtKey __lethe_block_key(
 	spa_t *spa,
 	boolean_t read,

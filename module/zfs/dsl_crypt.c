@@ -2922,6 +2922,31 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
 	ret = zio_do_crypt_data(encrypt, &dck->dck_key, lethe_key_override,
 	    ot, bswap, salt, iv, mac, datalen, plainbuf, cipherbuf, no_crypt);
 
+	// Lethe: a decrypt can race a concurrent rewrite of the same blkid.
+	// The rewrite marks the block in the current epoch (routing readers
+	// to the new tree key) while the version being decrypted may still be
+	// the pre-rewrite one, encrypted under the previous epoch's (forest)
+	// key. Retry once with that key; it remains derivable until the next
+	// patch, which is Lethe's secure-delete boundary.
+	if (ret != 0 && !encrypt && lethe_key_override != NULL) {
+		struct KhtKey prev_key = lethe_bookmark_prev_key(spa, zb);
+		if (memcmp(prev_key.bytes, lethe_key.bytes, KHT_KEY_SIZE) != 0) {
+			ret = zio_do_crypt_data(encrypt, &dck->dck_key,
+			    prev_key.bytes, ot, bswap, salt, iv, mac, datalen,
+			    plainbuf, cipherbuf, no_crypt);
+#if defined(__KERNEL__) && defined(DEBUG)
+			lethe_info(
+			        "LKEY retry zb=%llu/%llu/%lld/%llu ret=%d\n",
+			        (u_longlong_t)zb->zb_objset,
+			        (u_longlong_t)zb->zb_object,
+			        (longlong_t)zb->zb_level,
+			        (u_longlong_t)zb->zb_blkid,
+			        ret
+			);
+#endif
+		}
+	}
+
 	/*
 	 * Handle injected decryption faults. Unfortunately, we cannot inject
 	 * faults for dnode blocks because we might trigger the panic in
