@@ -135,6 +135,11 @@ void __lethe_load_object_erl(spa_t *spa, uint64_t objset, uint64_t object);
 /// identified by its object set ID (`objset`).
 void __lethe_load_master_erl(spa_t *spa, uint64_t objset);
 
+/// Eagerly loads every ERL mapped in the master and object ERL maps into
+/// their in-memory stores. Called at import (open context) so that the ZIO
+/// crypt path never faults an ERL in from disk while holding the lethe locks.
+void __lethe_load_all_erls(spa_t *spa);
+
 /// Helper function for loading in the bytes of a serialized ERL given its name
 /// and the ERL map (`nvp`) that contains the mapping of its name to its object
 /// ID. The object ERL is assumed to be added to the MOS pointed to by the `spa`.
@@ -148,21 +153,43 @@ vec(uint8_t) __lethe_load_erl_bytes(
 /// This is the only sync-related function that should be called outside of
 /// `dsl_lethe.c`. The other sync-related functions could have been `static`
 /// functions, but declaring the prototypes here declutters things.
+///
+/// Runs in two phases: phase A patches, keys, and serializes every dirty ERL
+/// entirely in memory while the lethe locks are held; phase B drops the locks
+/// and performs all DMU allocation and writes. No lethe lock may ever be held
+/// across blocking DMU I/O: the ZIO taskq threads that complete that I/O also
+/// take these locks in `lethe_bookmark_key()`, so sleeping on I/O with a lock
+/// held deadlocks the pool.
 void lethe_sync(spa_t *spa, dmu_tx_t *tx);
 
-/// Syncs out the object ERL store during transaction `tx`. ERLs that were
-/// created or modified during the current epoch are patched during this process
-/// and persisted as DMU objects under the MOS in the given `spa`. Each object
-/// can be identified by its unique name constructed from the object set ID it
-/// belongs to and its object ID.
-void __lethe_sync_object_erlstore(spa_t *spa, dmu_tx_t *tx);
+/// One dirty ERL captured by phase A of `lethe_sync()`: its serialized
+/// (encrypted) bytes plus everything phase B needs to allocate and write its
+/// backing object without consulting the ERL stores again.
+struct LetheSyncEntry {
+	boolean_t is_master;
+	uint64_t objset;
+	uint64_t object;
+	struct Str name;
+	vec(uint8_t) bytes;
+	uint64_t erlobject;
+};
 
-/// Syncs out the master ERL store during transaction `tx`. ERLs that were
-/// created or modified during the current epoch are patched during this process
-/// and persisted as DMU objects under the MOS in the given `spa`. Each object
-/// can be identified by its unique name constructed from the object set ID it
-/// belongs to and its object ID.
-void __lethe_sync_master_erlstore(spa_t *spa, dmu_tx_t *tx);
+/// Captures the object ERL store for `lethe_sync()` phase A. ERLs that were
+/// created or modified during the current epoch are patched, keyed, and
+/// serialized into `entries`; entries with `erlobject == 0` still need their
+/// backing DMU object allocated in phase B. Memory-only: all lethe locks are
+/// held by the caller.
+void __lethe_capture_object_erlstore(
+	spa_t *spa,
+	vec(struct LetheSyncEntry) *entries
+);
+
+/// Captures the master ERL store for `lethe_sync()` phase A, in the same way
+/// as `__lethe_capture_object_erlstore()` captures the object ERL store.
+void __lethe_capture_master_erlstore(
+	spa_t *spa,
+	vec(struct LetheSyncEntry) *entries
+);
 
 /// Helper function for syncing out an ERL during transaction `tx`. The ERL
 /// should be serialized (perhaps also encrypted) and passed as `bytes`. The ID
@@ -189,22 +216,18 @@ void __lethe_sync_object_erlmap(spa_t *spa, dmu_tx_t *tx);
 /// itself is stored as an `nvlist` under the MOS in the given `spa`.
 void __lethe_sync_master_erlmap(spa_t *spa, dmu_tx_t *tx);
 
-/// General function for syncing an ERL map (`nvp`) during transaction `tx`.  The
-/// ERL map is packed and stored as an object with the specified ID (`object`).
-/// If the object ID doesn't yet exist (i.e. equals zero), then a new object is
-/// allocated and its ID passed through `object`. The allocated object is given
-/// the specified `name` and added to the MOS pointed to by the `spa`.
+/// General function for syncing an ERL map (`nvp`) during transaction `tx`.
+/// The ERL map is packed (under `lock`, which must not already be held by the
+/// caller) and stored in the object with the specified ID (`object`) under the
+/// MOS pointed to by the `spa`. The DMU write happens with no lethe locks
+/// held.
 void __lethe_sync_erlmap(
 	spa_t *spa,
 	dmu_tx_t *tx,
-	const char *name,
 	nvlist_t *nvp,
-	uint64_t *object
+	krwlock_t *lock,
+	uint64_t object
 );
-
-/// Syncs out the uber ERL during transaction `tx`, persisting it as a
-/// DMU object under the MOS in the given `spa`.
-void __lethe_sync_uber_erl(spa_t *spa, dmu_tx_t *tx);
 
 /// Generates the name for an object ERL for use in an `nvlist`. The `objset`
 /// and `object` parameters identify the object ERL to name.

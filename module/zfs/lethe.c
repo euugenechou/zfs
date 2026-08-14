@@ -145,6 +145,8 @@ void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 void lethe_load(spa_t *spa) {
 	lethe_info("lethe_load(): start\n");
 
+	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
 	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
 	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
 	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
@@ -154,11 +156,42 @@ void lethe_load(spa_t *spa) {
 	__lethe_load_master_erlmap(spa);
 	__lethe_load_object_erlmap(spa);
 
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	// Eagerly load every mapped ERL while we're in open context, where
+	// blocking on DMU I/O under the lethe locks is safe. This keeps the
+	// ZIO crypt path (lethe_bookmark_key) from ever having to fault an
+	// ERL in from disk: it runs in ZIO taskq context, where sleeping on
+	// I/O under these locks can starve the taskq and deadlock the pool.
+	__lethe_load_all_erls(spa);
+
 	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
 
 	lethe_info("lethe_load(): end\n");
+}
+
+void __lethe_load_all_erls(spa_t *spa) {
+	// Masters first: object ERL keys are read under their master ERL.
+	nvpair_t *elem = NULL;
+	while ((elem = nvlist_next_nvpair(spa->lethe_master_erlmap, elem)) != NULL) {
+		unsigned long long objset = 0;
+		if (sscanf(nvpair_name(elem),
+		    "lethe_objset_master_%llu", &objset) == 1) {
+			__lethe_load_master_erl(spa, objset);
+		}
+	}
+
+	elem = NULL;
+	while ((elem = nvlist_next_nvpair(spa->lethe_object_erlmap, elem)) != NULL) {
+		unsigned long long objset = 0;
+		unsigned long long object = 0;
+		if (sscanf(nvpair_name(elem),
+		    "lethe_objset_%llu_object_%llu", &objset, &object) == 2) {
+			__lethe_load_object_erl(spa, objset, object);
+		}
+	}
 }
 
 void __lethe_load_root(spa_t *spa) {
@@ -391,6 +424,21 @@ void __lethe_load_master_erl(spa_t *spa, uint64_t objset) {
 
 		// Get the master ERL's key, deserialize the master ERL, and decrypt it.
 		struct KhtKey key = __lethe_master_erl_read_key(spa, objset);
+
+#if defined(__KERNEL__) && defined(DEBUG)
+		{
+			struct Str keystr = khtkey_to_string(&key);
+			lethe_info(
+				"%s: bytes = %zu, key = %.*s\n",
+				str_buf(&name),
+				vec_len(&bytes),
+				(int)str_len(&keystr),
+				str_buf(&keystr)
+			);
+			str_drop(&keystr);
+		}
+#endif
+
 		struct Erl erl = erl_deserialize_keyed(&bytes, &key);
 
 		// Insert master ERL into master ERL store.
@@ -445,6 +493,14 @@ vec(uint8_t) __lethe_load_erl_bytes(
 void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
     lethe_info("current thread start: (%p)\n", (void *)current);
 
+	// Phase A: capture this epoch's state entirely in memory while
+	// holding the lethe locks. NO DMU calls are allowed while any lethe
+	// lock is held: the ZIO taskq threads that would complete our I/O
+	// block on these locks in lethe_bookmark_key(), so sleeping on I/O
+	// here deadlocks the pool (txg_sync <-> z_rd_int circular wait).
+	vec(struct LetheSyncEntry) entries = vec_new();
+	vec(uint8_t) uber_bytes = vec_new();
+
 	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
 	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
 	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
@@ -453,42 +509,94 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 
 	// Nothing to sync if nothing was modified.
 	if (!spa->lethe_epoch_dirty) {
-		lethe_rw_exit(&spa->lethe_master_erlstore_lock);
-		lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-		lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-		lethe_rw_exit(&spa->lethe_object_erlmap_lock);
 		lethe_rw_exit(&spa->lethe_uber_erl_lock);
-		// lethe_info("lethe_sync(): end (sync'ed)\n");
+		lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+		lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+		lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+		lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+		vec_drop(&entries);
 		return;
 	}
 
-	// Sync the object ERL store first, then the master ERL store, then the
-	// two ERL maps, then the uber ERL. It's imperative that the object ERL
-	// store is sync'ed before the master ERL store because each object ERL
-	// needs to be protected by a key generated from its corresponding
-	// master ERL. It's also imperative that the master ERL store is sync'ed
-	// before the uber ERL because each master ERL needs to be protected by
-	// a key generated from the uber ERL.
-	__lethe_sync_object_erlstore(spa, tx);
-	__lethe_sync_master_erlstore(spa, tx);
-	__lethe_sync_object_erlmap(spa, tx);
-	__lethe_sync_master_erlmap(spa, tx);
-	__lethe_sync_uber_erl(spa, tx);
+	// Capture the object ERL store first, then the master ERL store, then
+	// the uber ERL. It's imperative that the object ERLs are captured
+	// before the master ERL store because each object ERL needs to be
+	// protected by a key generated from its corresponding master ERL.
+	// It's also imperative that the master ERL store is captured before
+	// the uber ERL because each master ERL needs to be protected by a key
+	// generated from the uber ERL.
+	__lethe_capture_object_erlstore(spa, &entries);
+	__lethe_capture_master_erlstore(spa, &entries);
 
-	// Mark that modifications were sync'ed.
+	VERIFY(spa->lethe_uber_erl_object != 0);
+	erl_patch(&spa->lethe_uber_erl);
+	erl_reset(&spa->lethe_uber_erl);
+	uber_bytes = erl_serialize(&spa->lethe_uber_erl);
+
+	// Mark that this epoch's modifications were captured. Key derivations
+	// that happen after this point dirty the next epoch.
 	spa->lethe_epoch_dirty = B_FALSE;
 
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
 	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
 
-	// lethe_info("lethe_sync(): end\n");
+	// Phase B: allocate backing objects and write everything out with no
+	// lethe locks held. The ERL maps are only re-locked briefly for the
+	// in-memory nvlist inserts/packs.
+	for (size_t i = 0; i < vec_len(&entries); i += 1) {
+		struct LetheSyncEntry *entry = &entries[i];
+
+		if (entry->erlobject == 0) {
+			entry->erlobject = __lethe_alloc_object(
+				spa,
+				tx,
+				str_buf(&entry->name),
+				DMU_OTN_UINT8_METADATA,
+				DMU_OTN_UINT64_METADATA
+			);
+			if (entry->is_master) {
+				lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
+				VERIFY(__lethe_master_erlmap_insert(
+					spa,
+					entry->objset,
+					entry->erlobject
+				));
+				lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+			} else {
+				lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
+				VERIFY(__lethe_object_erlmap_insert(
+					spa,
+					entry->objset,
+					entry->object,
+					entry->erlobject
+				));
+				lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+			}
+		}
+
+		__lethe_sync_erl_object(spa, tx, entry->erlobject, &entry->bytes);
+
+		str_drop(&entry->name);
+		vec_drop(&entry->bytes);
+	}
+	vec_drop(&entries);
+
+	__lethe_sync_object_erlmap(spa, tx);
+	__lethe_sync_master_erlmap(spa, tx);
+
+	__lethe_sync_erl_object(spa, tx, spa->lethe_uber_erl_object, &uber_bytes);
+	vec_drop(&uber_bytes);
+
     lethe_info("current thread end: (%p)\n", (void *)current);
 }
 
-void __lethe_sync_object_erlstore(spa_t *spa, dmu_tx_t *tx) {
+void __lethe_capture_object_erlstore(
+	spa_t *spa,
+	vec(struct LetheSyncEntry) *entries
+) {
 	lethe_info("(start)\n");
 
 	// Iterate over the master ERL store.
@@ -501,40 +609,26 @@ void __lethe_sync_object_erlstore(spa_t *spa, dmu_tx_t *tx) {
 		uint64_t object = 0;
 		struct BTreeSetIter object_iter = btreeset_iter(&master_erl->modified);
 
-		// TODO: remove debugging
-		struct Str modified_str = btreeset_to_string(&master_erl->modified);
-		lethe_info(
-			"__lethe_sync_object_erlstore(): modified = %.*s\n",
-			(int)str_len(&modified_str),
-			str_buf(&modified_str)
-		);
-		str_drop(&modified_str);
-
 		while (btreesetiter_next(&object_iter, &object)) {
-			// Get name for the ERL.
-			struct Str name = __lethe_object_erl_name(objset, object);
-			lethe_info("__lethe_sync_object_erlstore(): %s\n", str_buf(&name));
+			struct LetheSyncEntry entry = {
+				.is_master = B_FALSE,
+				.objset = objset,
+				.object = object,
+				.name = __lethe_object_erl_name(objset, object),
+				.bytes = vec_new(),
+				.erlobject = 0,
+			};
 
-			// Allocate new ERL object and map it if it doesn't exist.
-			if (!__lethe_object_erlmap_contains(spa, objset, object)) {
-				uint64_t erlobject = __lethe_alloc_object(
+			// Look up the backing object; 0 means phase B must
+			// allocate (and map) one.
+			if (__lethe_object_erlmap_contains(spa, objset, object)) {
+				VERIFY(__lethe_object_erlmap_get(
 					spa,
-					tx,
-					str_buf(&name),
-					DMU_OTN_UINT8_METADATA,
-					DMU_OTN_UINT64_METADATA
-				);
-				VERIFY(__lethe_object_erlmap_insert(spa, objset, object, erlobject));
+					objset,
+					object,
+					&entry.erlobject
+				));
 			}
-
-			// Get the mapping for the ERL.
-			uint64_t erlobject = 0;
-			VERIFY(__lethe_object_erlmap_get(spa, objset, object, &erlobject));
-			// lethe_info(
-			// 	"__lethe_sync_object_erlstore(): %s -> %" PRIu64 "\n",
-			// 	str_buf(&name),
-			// 	erlobject
-			// );
 
 			// Get the modified ERL, patch it, then reset for next epoch.
 			struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
@@ -542,26 +636,25 @@ void __lethe_sync_object_erlstore(spa_t *spa, dmu_tx_t *tx) {
 			erl_patch(erl);
 			erl_reset(erl);
 
-			// Get the ERL's key, serialize it, encrypt it, and sync it.
+			// Get the ERL's key, then serialize and encrypt it.
 			struct KhtKey key = __lethe_object_erl_write_key(spa, objset, object);
-			vec(uint8_t) bytes = erl_serialize_keyed(erl, &key);
+			entry.bytes = erl_serialize_keyed(erl, &key);
 
-			struct Str keystr = khtkey_to_string(&key);
-			lethe_info(
-				"%s: bytes = %zu, key = %.*s\n",
-				str_buf(&name),
-				vec_len(&bytes),
-				(int)str_len(&keystr),
-				str_buf(&keystr)
-			);
-			str_drop(&keystr);
+#if defined(__KERNEL__) && defined(DEBUG)
+			{
+				struct Str keystr = khtkey_to_string(&key);
+				lethe_info(
+					"%s: bytes = %zu, key = %.*s\n",
+					str_buf(&entry.name),
+					vec_len(&entry.bytes),
+					(int)str_len(&keystr),
+					str_buf(&keystr)
+				);
+				str_drop(&keystr);
+			}
+#endif
 
-			// Sync the object, then reset it for the next epoch.
-			__lethe_sync_erl_object(spa, tx, erlobject, &bytes);
-
-			// Clean up.
-			vec_drop(&bytes);
-			str_drop(&name);
+			vec_push(entries, entry);
 		}
 
 		btreesetiter_drop(&object_iter);
@@ -572,64 +665,54 @@ void __lethe_sync_object_erlstore(spa_t *spa, dmu_tx_t *tx) {
 	lethe_info("(end)\n");
 }
 
-void __lethe_sync_master_erlstore(spa_t *spa, dmu_tx_t *tx) {
+void __lethe_capture_master_erlstore(
+	spa_t *spa,
+	vec(struct LetheSyncEntry) *entries
+) {
 	lethe_info("(start)\n");
 
 	// Iterate over the master ERL store.
 	uint64_t objset = 0;
-	struct Erl *erl = NULL;
+	struct Erl *master_erl = NULL;
 	struct BTreeMapIter iter = btreemap_iter(&spa->lethe_master_erlstore);
 
-	while (btreemapiter_next(&iter, &objset, &erl)) {
-		// Get name for the master ERL.
-		struct Str name = __lethe_master_erl_name(objset);
-		lethe_info(
-			"syncing %.*s\n",
-			(int)str_len(&name),
-			str_buf(&name)
-		);
+	while (btreemapiter_next(&iter, &objset, &master_erl)) {
+		struct LetheSyncEntry entry = {
+			.is_master = B_TRUE,
+			.objset = objset,
+			.object = 0,
+			.name = __lethe_master_erl_name(objset),
+			.bytes = vec_new(),
+			.erlobject = 0,
+		};
 
-		// Allocate new master ERL object and map it if it doesn't exist.
-		if (!__lethe_master_erlmap_contains(spa, objset)) {
-			uint64_t erlobject = __lethe_alloc_object(
-				spa,
-				tx,
-				str_buf(&name),
-				DMU_OTN_UINT8_METADATA,
-				DMU_OTN_UINT64_METADATA
-			);
-			__lethe_master_erlmap_insert(spa, objset, erlobject);
+		if (__lethe_master_erlmap_contains(spa, objset)) {
+			VERIFY(__lethe_master_erlmap_get(spa, objset, &entry.erlobject));
 		}
 
-		// Get the mapping for the master ERL.
-		uint64_t erlobject = 0;
-		VERIFY(__lethe_master_erlmap_get(spa, objset, &erlobject));
+		// Patch the modified master ERL and reset it for the next epoch.
+		erl_patch(master_erl);
+		erl_reset(master_erl);
 
-		// Get the modified master ERL, patch it, and reset if for the next epoch.
-		struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
-		VERIFY(erl != NULL);
-		erl_patch(erl);
-		erl_reset(erl);
-
-		// Get the master ERL's key, serialize it, encrypt it, and sync it.
+		// Get the master ERL's key, then serialize and encrypt it.
 		struct KhtKey key = __lethe_master_erl_write_key(spa, objset);
-		vec(uint8_t) bytes = erl_serialize_keyed(master_erl, &key);
+		entry.bytes = erl_serialize_keyed(master_erl, &key);
 
-		struct Str keystr = khtkey_to_string(&key);
-		lethe_info(
-			"%s: bytes = %zu, key = %.*s\n",
-			str_buf(&name),
-			vec_len(&bytes),
-			(int)str_len(&keystr),
-			str_buf(&keystr)
-		);
-		str_drop(&keystr);
+#if defined(__KERNEL__) && defined(DEBUG)
+		{
+			struct Str keystr = khtkey_to_string(&key);
+			lethe_info(
+				"%s: bytes = %zu, key = %.*s\n",
+				str_buf(&entry.name),
+				vec_len(&entry.bytes),
+				(int)str_len(&keystr),
+				str_buf(&keystr)
+			);
+			str_drop(&keystr);
+		}
+#endif
 
-		__lethe_sync_erl_object(spa, tx, erlobject, &bytes);
-
-		// Clean up.
-		vec_drop(&bytes);
-		str_drop(&name);
+		vec_push(entries, entry);
 	}
 
 	btreemapiter_drop(&iter);
@@ -667,9 +750,9 @@ void __lethe_sync_master_erlmap(spa_t *spa, dmu_tx_t *tx) {
 	__lethe_sync_erlmap(
 		spa,
 		tx,
-		LETHE_MASTER_ERLMAP,
 		spa->lethe_master_erlmap,
-		&spa->lethe_master_erlmap_object
+		&spa->lethe_master_erlmap_lock,
+		spa->lethe_master_erlmap_object
 	);
 
 	lethe_info("(end)\n");
@@ -681,9 +764,9 @@ void __lethe_sync_object_erlmap(spa_t *spa, dmu_tx_t *tx) {
 	__lethe_sync_erlmap(
 		spa,
 		tx,
-		LETHE_OBJECT_ERLMAP,
 		spa->lethe_object_erlmap,
-		&spa->lethe_object_erlmap_object
+		&spa->lethe_object_erlmap_lock,
+		spa->lethe_object_erlmap_object
 	);
 
 	lethe_info("(end)\n");
@@ -692,27 +775,29 @@ void __lethe_sync_object_erlmap(spa_t *spa, dmu_tx_t *tx) {
 void __lethe_sync_erlmap(
 	spa_t *spa,
 	dmu_tx_t *tx,
-	const char *name,
 	nvlist_t *nvp,
-	uint64_t *object
+	krwlock_t *lock,
+	uint64_t object
 ) {
-	(void) name;
+	// Pack the nvlist into contiguous memory under its lock; the DMU
+	// write below must happen with no lethe locks held (see lethe_sync).
+	lethe_rw_enter(lock, RW_READER);
 
-	// Get the size of the nvlist.
 	uint64_t size = 0;
 	nvlist_size(nvp, (size_t *)&size, NV_ENCODE_XDR);
 
-	// Pack the nvlist into contiguous memory.
 	char *packed_nvp = kmem_alloc(size, KM_SLEEP);
 	nvlist_pack(nvp, &packed_nvp, (size_t *)&size, NV_ENCODE_XDR, KM_SLEEP);
 
+	lethe_rw_exit(lock);
+
 	// Write to the DMU.
-	dmu_write(spa->spa_meta_objset, *object, 0, size, packed_nvp, tx,
+	dmu_write(spa->spa_meta_objset, object, 0, size, packed_nvp, tx,
 	    DMU_READ_NO_PREFETCH);
 
 	// Acquire the object's bonus buffer.
 	dmu_buf_t *db = NULL;
-	dmu_bonus_hold(spa->spa_meta_objset, *object, FTAG, &db);
+	dmu_bonus_hold(spa->spa_meta_objset, object, FTAG, &db);
 
 	// Mark bonus buffer as dirtied, update value, then release.
 	dmu_buf_will_dirty(db, tx);
@@ -721,21 +806,6 @@ void __lethe_sync_erlmap(
 
 	// Destroy the packed nvlist.
 	kmem_free(packed_nvp, size);
-}
-
-void __lethe_sync_uber_erl(spa_t *spa, dmu_tx_t *tx) {
-	// Patch the uber ERL and reset it for the next epoch.
-	erl_patch(&spa->lethe_uber_erl);
-	erl_reset(&spa->lethe_uber_erl);
-
-	// Serialize the uber ERL.
-	vec(uint8_t) bytes = erl_serialize(&spa->lethe_uber_erl);
-
-	// Sync the serialized ERL bytes.
-	__lethe_sync_erl_object(spa, tx, spa->lethe_uber_erl_object, &bytes);
-
-	// Clean up.
-	vec_drop(&bytes);
 }
 
 struct Str __lethe_object_erl_name(uint64_t objset, uint64_t object) {
@@ -1048,7 +1118,7 @@ boolean_t __lethe_master_erlmap_remove(
 ) {
 	struct Str name = __lethe_master_erl_name(objset);
 	boolean_t res = __lethe_erlmap_remove(
-		spa->lethe_object_erlmap,
+		spa->lethe_master_erlmap,
 		str_buf(&name)
 	);
 	str_drop(&name);
@@ -1125,14 +1195,14 @@ struct KhtKey lethe_bookmark_key(
 	const zbookmark_phys_t *bookmark
 ) {
     lethe_info("current thread start: (%p)\n", (void *)current);
-    // TODO: this function is the cause of the deadlock.
-    // For approximate results, we just create an ERL and derive a block key
-    // under it (should be around the same time as correct functionality).
-    // struct Erl erl = erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN);
-    // struct KhtKey key = erl_block_write_key(&erl, bookmark->zb_blkid);
-    // erl_drop(&erl);
-    // spa->lethe_epoch_dirty = B_TRUE;
-    // return key;
+
+    // This runs in ZIO taskq context (zio_encrypt on write issue,
+    // zio_decrypt on read completion). Two rules keep it deadlock-free:
+    // no blocking DMU I/O may happen under the lethe locks (ERLs are
+    // loaded eagerly at import; see __lethe_load_all_erls), and the
+    // vmalloc-based KHT allocations below must not recurse into
+    // filesystem reclaim, hence the fstrans mark.
+    fstrans_cookie_t cookie = spl_fstrans_mark();
 
     lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
 	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
@@ -1148,11 +1218,13 @@ struct KhtKey lethe_bookmark_key(
 		bookmark->zb_blkid
 	);
 
-    lethe_rw_exit(&spa->lethe_master_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-    lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+    lethe_rw_exit(&spa->lethe_uber_erl_lock);
 	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+    lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+
+    spl_fstrans_unmark(cookie);
 
     lethe_info("current thread end: (%p)\n", (void *)current);
 	return key;
