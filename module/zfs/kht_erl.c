@@ -76,6 +76,12 @@ struct KhtKey erl_block_read_key(struct Erl *self, uint64_t block) {
 
 void erl_overwrite(struct Erl *self, uint64_t start, uint64_t end) {
     self->blocks = max(self->blocks, end);
+    // A consolidated forest doesn't know its own extent; prime it with the
+    // ERL's block count so the fold's expansion covers every block instead
+    // of truncating the coverage at `end` and losing the trailing keys.
+    if (khf_is_consolidated(&self->forest)) {
+        self->forest.leaves = max(self->forest.leaves, self->blocks);
+    }
     khf_overwrite_keyed(&self->forest, start, end, self->tree.root.key);
     for (uint64_t i = start; i < end; i += 1) {
         btreeset_insert(&self->modified, i);

@@ -5,6 +5,7 @@
     #include <lethe/kht_pos.h>
     #include <lethe/kht_shape.h>
     #include <lethe/str.h>
+    #include <linux/bug.h>
     #include <linux/printk.h>
     #include <linux/string.h>
 #else
@@ -16,6 +17,7 @@
     #include <lethe/str.h>
     #include <inttypes.h>
     #include <stdio.h>
+    #include <stdlib.h>
     #include <string.h>
 #endif
 
@@ -120,7 +122,12 @@ struct KhtKey khf_node_key(struct Khf *self, struct KhtPos *n) {
         size = right - left;
     }
 
-    self->leaves = min(self->leaves, khtshape_end(&self->shape, n));
+    // Grow (never shrink) the tracked extent, mirroring the consolidated
+    // branch above. Shrinking here made every lookup clamp `leaves` to the
+    // queried block, so the next lookup would khf_append() random-keyed
+    // junk roots, breaking the sorted-roots invariant the binary search
+    // depends on and corrupting all subsequent key derivations.
+    self->leaves = max(self->leaves, khtshape_end(&self->shape, n));
     return khf_derive_key(self, &self->roots[index], n);
 }
 
@@ -331,6 +338,17 @@ struct Khf khf_deserialize(vec(uint8_t) *bytes) {
         roots_len |= (uint64_t)(*bytes)[i] << (i * 8);
     }
     vec_flush(bytes, 0, sizeof(uint64_t));
+
+    // Each serialized root consumes more than 8 bytes, so a count beyond the
+    // remaining input is corrupt (or decrypted with the wrong key). Fail
+    // loudly instead of looping for a garbage number of iterations.
+#ifdef __KERNEL__
+    BUG_ON(roots_len > vec_len(bytes));
+#else
+    if (roots_len > vec_len(bytes)) {
+        abort();
+    }
+#endif
 
     for (uint64_t i = 0; i < roots_len; i += 1) {
         struct KhtRoot root = khtroot_deserialize(bytes);

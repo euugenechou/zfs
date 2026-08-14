@@ -1,5 +1,6 @@
 #ifdef __KERNEL__
     #include <lethe/btreeset.h>
+    #include <linux/bug.h>
     #include <linux/printk.h>
 
     #ifndef PRIu64
@@ -10,6 +11,7 @@
     #include <assert.h>
     #include <inttypes.h>
     #include <stdio.h>
+    #include <stdlib.h>
 #endif
 
 #define DEFAULT_DEGREE 2
@@ -193,6 +195,17 @@ struct BTreeSet btreeset_deserialize(vec(uint8_t) *bytes) {
     vec_flush(bytes, 0, sizeof(uint64_t));
 
     struct BTreeSet self = btreeset_with_degree(degree);
+
+    // Each serialized entry consumes 8 bytes, so a count beyond the
+    // remaining input is corrupt (or decrypted with the wrong key). Fail
+    // loudly instead of looping for a garbage number of iterations.
+#ifdef __KERNEL__
+    BUG_ON(len > vec_len(bytes));
+#else
+    if (len > vec_len(bytes)) {
+        abort();
+    }
+#endif
 
     for (uint64_t i = 0; i < len; i += 1) {
         BTREESET_KEY_TYPE key = 0;
