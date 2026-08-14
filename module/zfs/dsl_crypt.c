@@ -2841,16 +2841,38 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
 		return (ret);
 	}
 
-	// Lethe: don't hijack keys for these objects due to KHT fragmentation.
+	// Lethe: don't override keys for these objects due to KHT fragmentation.
 	// TODO: figure out how to make this work.
+	//
+	// The per-block KHF key is passed down to zio_do_crypt_data() as an
+	// override rather than written into the shared dck: the dck is used
+	// concurrently by every crypt in this dataset, so mutating it races.
+	struct KhtKey lethe_key;
+	const uint8_t *lethe_key_override = NULL;
 	if (
 	        zb->zb_object != DMU_USERUSED_OBJECT &&
 	        zb->zb_object != DMU_GROUPUSED_OBJECT &&
 	        zb->zb_object != DMU_PROJECTUSED_OBJECT
 	) {
-	        // Lethe: hijack the DSL crypto key used by ZFS.
-	        struct KhtKey key = lethe_bookmark_key(spa, !encrypt, zb);
-	        lethe_hijack_dsl_crypto_key(dck, &key);
+	        lethe_key = lethe_bookmark_key(spa, !encrypt, zb);
+	        lethe_key_override = lethe_key.bytes;
+
+#if defined(__KERNEL__) && defined(DEBUG)
+	        lethe_info(
+	                "LKEY %s zb=%llu/%llu/%lld/%llu ot=%d "
+	                "key=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+	                encrypt ? "enc" : "dec",
+	                (u_longlong_t)zb->zb_objset,
+	                (u_longlong_t)zb->zb_object,
+	                (longlong_t)zb->zb_level,
+	                (u_longlong_t)zb->zb_blkid,
+	                (int)ot,
+	                lethe_key.bytes[0], lethe_key.bytes[1],
+	                lethe_key.bytes[2], lethe_key.bytes[3],
+	                lethe_key.bytes[4], lethe_key.bytes[5],
+	                lethe_key.bytes[6], lethe_key.bytes[7]
+	        );
+#endif
 	}
 
 
@@ -2887,8 +2909,8 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
 	}
 
 	/* call lower level function to perform encryption / decryption */
-	ret = zio_do_crypt_data(encrypt, &dck->dck_key, ot, bswap, salt, iv,
-	    mac, datalen, plainbuf, cipherbuf, no_crypt);
+	ret = zio_do_crypt_data(encrypt, &dck->dck_key, lethe_key_override,
+	    ot, bswap, salt, iv, mac, datalen, plainbuf, cipherbuf, no_crypt);
 
 	/*
 	 * Handle injected decryption faults. Unfortunately, we cannot inject

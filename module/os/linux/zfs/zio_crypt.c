@@ -1919,9 +1919,9 @@ error:
  */
 int
 zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
-    dmu_object_type_t ot, boolean_t byteswap, uint8_t *salt, uint8_t *iv,
-    uint8_t *mac, uint_t datalen, uint8_t *plainbuf, uint8_t *cipherbuf,
-    boolean_t *no_crypt)
+    const uint8_t *key_override, dmu_object_type_t ot, boolean_t byteswap,
+    uint8_t *salt, uint8_t *iv, uint8_t *mac, uint_t datalen,
+    uint8_t *plainbuf, uint8_t *cipherbuf, boolean_t *no_crypt)
 {
 	// if (encrypt && plainbuf[0] == 'h') {
 	//      lethe_info("encrypting data: [");
@@ -1948,6 +1948,21 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
 	memset(&cuio, 0, sizeof (cuio));
 
 	/*
+	 * Lethe: when the caller supplies a per-block key, use a private
+	 * copy of it and bypass the shared current-key/salt machinery
+	 * entirely. The shared dck must never be mutated per block: it is
+	 * used concurrently by every crypt in the dataset.
+	 */
+	if (key_override != NULL) {
+		memcpy(enc_keydata, key_override, keydata_len);
+
+		tmp_ckey.ck_data = enc_keydata;
+		tmp_ckey.ck_length = CRYPTO_BYTES2BITS(keydata_len);
+
+		ckey = &tmp_ckey;
+		tmpl = NULL;
+	} else {
+	/*
 	 * If the needed key is the current one, just use it. Otherwise we
 	 * need to generate a temporary one from the given salt + master key.
 	 * If we are encrypting, we must return a copy of the current salt
@@ -1973,6 +1988,7 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
 
 		ckey = &tmp_ckey;
 		tmpl = NULL;
+	}
 	}
 
 	/*
@@ -2065,7 +2081,7 @@ zio_do_crypt_abd(boolean_t encrypt, zio_crypt_key_t *key, dmu_object_type_t ot,
 		ctmp = abd_borrow_buf_copy(cabd, datalen);
 	}
 
-	ret = zio_do_crypt_data(encrypt, key, ot, byteswap, salt, iv, mac,
+	ret = zio_do_crypt_data(encrypt, key, NULL, ot, byteswap, salt, iv, mac,
 	    datalen, ptmp, ctmp, no_crypt);
 	if (ret != 0)
 		goto error;
