@@ -646,7 +646,8 @@ void __lethe_sync_erl_object(
 	lethe_info("(start)\n");
 
 	// Write the bytes of the ERL.
-	dmu_write(spa->spa_meta_objset, object, 0, vec_len(bytes), *bytes, tx);
+	dmu_write(spa->spa_meta_objset, object, 0, vec_len(bytes), *bytes, tx,
+	    DMU_READ_NO_PREFETCH);
 
 	// Acquire the ERL object's bonus buffer.
 	dmu_buf_t *db = NULL;
@@ -695,6 +696,8 @@ void __lethe_sync_erlmap(
 	nvlist_t *nvp,
 	uint64_t *object
 ) {
+	(void) name;
+
 	// Get the size of the nvlist.
 	uint64_t size = 0;
 	nvlist_size(nvp, (size_t *)&size, NV_ENCODE_XDR);
@@ -704,7 +707,8 @@ void __lethe_sync_erlmap(
 	nvlist_pack(nvp, &packed_nvp, (size_t *)&size, NV_ENCODE_XDR, KM_SLEEP);
 
 	// Write to the DMU.
-	dmu_write(spa->spa_meta_objset, *object, 0, size, packed_nvp, tx);
+	dmu_write(spa->spa_meta_objset, *object, 0, size, packed_nvp, tx,
+	    DMU_READ_NO_PREFETCH);
 
 	// Acquire the object's bonus buffer.
 	dmu_buf_t *db = NULL;

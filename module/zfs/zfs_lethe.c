@@ -164,7 +164,8 @@ zfs_lethe_meta_sync(zfsvfs_t *zfsvfs, dmu_tx_t *tx)
 		0,
 		zfsvfs->lethe_meta_size,
 		bytes,
-		tx
+		tx,
+		DMU_READ_NO_PREFETCH
 	);
 
 	dmu_buf_t *db;
@@ -363,7 +364,8 @@ zfs_lethe_meta_file_sync(znode_t *zp, zfsvfs_t *zfsvfs, dmu_tx_t *tx)
 		0,
 		zp->lethe_meta_size,
 		bytes,
-		tx
+		tx,
+		DMU_READ_NO_PREFETCH
 	);
 
 	dmu_buf_t *db;
