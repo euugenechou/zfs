@@ -2847,9 +2847,19 @@ spa_do_crypt_abd(boolean_t encrypt, spa_t *spa, const zbookmark_phys_t *zb,
 	// The per-block KHF key is passed down to zio_do_crypt_data() as an
 	// override rather than written into the shared dck: the dck is used
 	// concurrently by every crypt in this dataset, so mutating it races.
+	//
+	// ZIL blocks are never overridden. Their bookmarks reuse (objset,
+	// object 0, blkid) at zb_level == ZB_ZIL_LEVEL, but the ERL block
+	// index ignores the level, so a ZIL write would rotate the key slot
+	// out from under the meta-dnode block with the same blkid (observed:
+	// unreadable dnode blocks after export/import). They are also replayed
+	// after a crash, when Lethe's unsynced in-memory key state no longer
+	// exists; their committed contents are rewritten to final, overridden
+	// locations anyway.
 	struct KhtKey lethe_key;
 	const uint8_t *lethe_key_override = NULL;
 	if (
+	        ot != DMU_OT_INTENT_LOG &&
 	        zb->zb_object != DMU_USERUSED_OBJECT &&
 	        zb->zb_object != DMU_GROUPUSED_OBJECT &&
 	        zb->zb_object != DMU_PROJECTUSED_OBJECT
