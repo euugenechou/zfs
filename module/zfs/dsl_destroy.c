@@ -37,6 +37,9 @@
 #include <sys/dsl_pool.h>
 #include <sys/dsl_dir.h>
 #include <sys/dmu_traverse.h>
+
+// Lethe stuff
+#include <lethe/lethe.h>
 #include <sys/dsl_scan.h>
 #include <sys/dmu_objset.h>
 #include <sys/zap.h>
@@ -1024,6 +1027,11 @@ dsl_destroy_head_sync_impl(dsl_dataset_t *ds, dmu_tx_t *tx)
 	ASSERT(RRW_WRITE_HELD(&dp->dp_config_rwlock));
 
 	dsl_dir_cancel_waiters(ds->ds_dir);
+
+	// Lethe: purge every key for this objset; the next uber patch makes
+	// the whole dataset cryptographically underivable. Memory-only work
+	// plus queueing, so it is safe in syncing context.
+	lethe_objset_destroy(dp->dp_spa, ds->ds_object);
 
 	rmorigin = (dsl_dir_is_clone(ds->ds_dir) &&
 	    DS_IS_DEFER_DESTROY(ds->ds_prev) &&

@@ -488,6 +488,12 @@ struct spa {
 	krwlock_t lethe_object_erlstore_lock;   // Lock for object ERL store.
 	struct HashMap lethe_object_erlstore;   // In-memory object ERL store.
 
+	// Lethe: purge queue fields. On-disk ERL objects orphaned by key
+	// purging (file delete, dataset destroy); freed in lethe_sync phase B.
+	// The mutex is only ever taken alone or inside the ERL locks above.
+	kmutex_t lethe_purge_lock;              // Lock for purge queue.
+	vec(struct LethePurgeEntry) lethe_purge_queue;  // Pending frees.
+
 	/* arc_memory_throttle() parameters during low memory condition */
 	uint64_t	spa_lowmem_page_load;	/* memory load during txg */
 	uint64_t	spa_lowmem_last_txg;	/* txg window start */

@@ -35,6 +35,9 @@
 #include <sys/zfeature.h>
 #include <sys/dsl_dataset.h>
 
+// Lethe stuff
+#include <lethe/lethe.h>
+
 /*
  * Each of the concurrent object allocators will grab
  * 2^dmu_object_alloc_chunk_shift dnode slots at a time.  The default is to
@@ -371,6 +374,14 @@ dmu_object_free(objset_t *os, uint64_t object, dmu_tx_t *tx)
 		return (err);
 
 	ASSERT(dn->dn_type != DMU_OT_NONE);
+
+	// Lethe: purge the object's keys before the dnode is torn down. This
+	// also drops the object's ERL from the store, so the free-range hook
+	// below no-ops instead of marking every block individually.
+	if (os->os_encrypted) {
+		lethe_object_free(dmu_objset_spa(os), dmu_objset_id(os), object);
+	}
+
 	/*
 	 * If we don't create this free range, we'll leak indirect blocks when
 	 * we get to freeing the dnode in syncing context.

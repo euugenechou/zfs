@@ -105,6 +105,46 @@ void lethe_setup(spa_t *spa, dmu_tx_t *tx);
 /// `spa_load()`, which is called when ZFS tries to import an exported SPA.
 void lethe_load(spa_t *spa);
 
+/// An on-disk ERL object orphaned by key purging, queued on
+/// `spa->lethe_purge_queue` for `lethe_sync()` phase B to free (and to
+/// remove its `name` from the lethe root object).
+struct LethePurgeEntry {
+	struct Str name;
+	uint64_t object;
+};
+
+/// Purges the keys of a deleted object: drops its ERL from the object ERL
+/// store, removes its ERL map entry, re-marks its slot in its master ERL
+/// (so the next epoch patch makes the serialized object ERL underivable),
+/// and queues the backing DMU object for freeing. Call from
+/// `dmu_object_free()` before the dnode is torn down. Memory-only under
+/// the lethe locks; no-op for untracked objects.
+void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object);
+
+/// Purges the keys of a fully-freed data block range [start, end) of an
+/// object (truncate). Re-marks the range in the object's ERL so the next
+/// epoch patch rotates those block keys. `end` may be UINT64_MAX for
+/// truncate-to-end; the range is clamped to the ERL's block count. No-op
+/// if the object has no resident ERL.
+void lethe_object_free_range(
+	spa_t *spa,
+	uint64_t objset,
+	uint64_t object,
+	uint64_t start,
+	uint64_t end
+);
+
+/// Purges every key for a destroyed objset: drops all of its object ERLs
+/// and its master ERL, removes all their ERL map entries, re-marks the
+/// objset's slot in the uber ERL (so the next epoch patch makes the whole
+/// dataset underivable), and queues all backing DMU objects for freeing.
+/// Call from the dataset-destroy sync path.
+void lethe_objset_destroy(spa_t *spa, uint64_t objset);
+
+/// Queues an orphaned on-disk ERL object (and its name in the lethe root
+/// object) for `lethe_sync()` phase B to free. Takes ownership of `name`.
+void __lethe_queue_purge(spa_t *spa, struct Str name, uint64_t object);
+
 /// Loads the root object from the pool directory object in the `spa`. This
 /// function should only be called once in `lethe_load()`, which is called when
 /// ZFS tries to import an exported SPA.

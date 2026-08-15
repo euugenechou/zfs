@@ -42,6 +42,7 @@
 #include <sys/zfs_project.h>
 
 // Lethe stuff
+#include <lethe/lethe.h>
 #include <lethe/log.h>
 
 dnode_stats_t dnode_stats = {
@@ -2258,6 +2259,31 @@ dnode_free_range(dnode_t *dn, uint64_t off, uint64_t len, dmu_tx_t *tx)
 	if (len == DMU_OBJECT_END) {
 		len = UINT64_MAX - off;
 		trunc = TRUE;
+	}
+
+	// Lethe: re-mark the fully-freed data block range so the next epoch
+	// patch rotates those keys. Partial edge blocks get rewritten by ZFS
+	// and are covered by overwrite rotation; a full-object free already
+	// purged the ERL in dmu_object_free(), making this a no-op there.
+	if (dn->dn_objset->os_encrypted) {
+		uint64_t lethe_start, lethe_end;
+		if (blkshift == 0) {
+			// Single-block object: only a whole-object free (or a
+			// truncate from offset 0) purges its one block.
+			lethe_start = 0;
+			lethe_end = (off == 0 && (trunc ||
+			    len >= (uint64_t)blksz)) ? 1 : 0;
+		} else {
+			lethe_start = (off + blksz - 1) >> blkshift;
+			lethe_end = trunc ? UINT64_MAX :
+			    ((off + len) >> blkshift);
+		}
+		if (lethe_start < lethe_end) {
+			lethe_object_free_range(
+			    dmu_objset_spa(dn->dn_objset),
+			    dmu_objset_id(dn->dn_objset),
+			    dn->dn_object, lethe_start, lethe_end);
+		}
 	}
 
 	/*

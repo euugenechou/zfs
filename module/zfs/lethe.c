@@ -57,6 +57,10 @@ void lethe_init(spa_t *spa) {
 	rw_init(&spa->lethe_uber_erl_lock, NULL, RW_DEFAULT, NULL);
 	spa->lethe_uber_erl = erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN);
 
+	// Initialize purge queue fields.
+	mutex_init(&spa->lethe_purge_lock, NULL, MUTEX_DEFAULT, NULL);
+	spa->lethe_purge_queue = vec_new();
+
 	// Initialize general fields.
 	spa->lethe_root_object = 0;
 	spa->lethe_root_object_loaded = B_FALSE;
@@ -87,6 +91,15 @@ void lethe_fini(spa_t *spa) {
 	// Destroy uber ERL fields.
 	rw_destroy(&spa->lethe_uber_erl_lock);
 	erl_drop(&spa->lethe_uber_erl);
+
+	// Destroy purge queue fields. Entries still queued here were never
+	// drained by a sync; their on-disk objects stay orphaned (harmless:
+	// their keys are already unreachable once the epoch rotated).
+	for (size_t i = 0; i < vec_len(&spa->lethe_purge_queue); i += 1) {
+		str_drop(&spa->lethe_purge_queue[i].name);
+	}
+	vec_drop(&spa->lethe_purge_queue);
+	mutex_destroy(&spa->lethe_purge_lock);
 
 	lethe_info("lethe_fini(): end\n");
 }
@@ -584,6 +597,29 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	}
 	vec_drop(&entries);
 
+	// Drain the purge queue: free the backing objects of purged ERLs and
+	// drop their names from the lethe root object. Lands in the same txg
+	// as the map rewrites and the epoch rotation captured above.
+	mutex_enter(&spa->lethe_purge_lock);
+	vec(struct LethePurgeEntry) purge = spa->lethe_purge_queue;
+	spa->lethe_purge_queue = vec_new();
+	mutex_exit(&spa->lethe_purge_lock);
+
+	for (size_t i = 0; i < vec_len(&purge); i += 1) {
+		struct LethePurgeEntry *entry = &purge[i];
+		lethe_info("freeing %s -> %llu\n",
+		    str_buf(&entry->name), (u_longlong_t)entry->object);
+		VERIFY0(zap_remove(
+			spa->spa_meta_objset,
+			spa->lethe_root_object,
+			str_buf(&entry->name),
+			tx
+		));
+		VERIFY0(dmu_object_free(spa->spa_meta_objset, entry->object, tx));
+		str_drop(&entry->name);
+	}
+	vec_drop(&purge);
+
 	__lethe_sync_object_erlmap(spa, tx);
 	__lethe_sync_master_erlmap(spa, tx);
 
@@ -610,6 +646,15 @@ void __lethe_capture_object_erlstore(
 		struct BTreeSetIter object_iter = btreeset_iter(&master_erl->modified);
 
 		while (btreesetiter_next(&object_iter, &object)) {
+			// A purged object (lethe_object_free) is marked under
+			// its master but its ERL is gone: there is nothing to
+			// serialize, and the master patch below rotating its
+			// slot IS the purge.
+			struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
+			if (erl == NULL) {
+				continue;
+			}
+
 			struct LetheSyncEntry entry = {
 				.is_master = B_FALSE,
 				.objset = objset,
@@ -630,9 +675,7 @@ void __lethe_capture_object_erlstore(
 				));
 			}
 
-			// Get the modified ERL, patch it, then reset for next epoch.
-			struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
-			VERIFY(erl != NULL);
+			// Patch the modified ERL, then reset for next epoch.
 			erl_patch(erl);
 			erl_reset(erl);
 
@@ -942,6 +985,10 @@ boolean_t __lethe_insert_master_erl(
 	return B_FALSE;
 }
 
+// NOTE: the containers own their values -- btreemapnode_delete() and
+// hashmap_remove() deep-drop the removed Erl/BTreeMap themselves. Never
+// erl_drop() a value that is still inside (or being removed from) a
+// container; that double-frees its heap state.
 boolean_t __lethe_remove_master_erl(spa_t *spa, uint64_t objset) {
 	if (btreemap_contains(&spa->lethe_master_erlstore, objset)) {
 		btreemap_remove(&spa->lethe_master_erlstore, objset);
@@ -972,6 +1019,7 @@ boolean_t __lethe_remove_object_erl(
 	struct BTreeMap *erlstore = __lethe_get_object_erlstore(spa, objset);
 
 	// Remove object's ERL from the object's ERL store if it exists.
+	// (btreemap_remove deep-drops the removed value itself.)
 	if (btreemap_contains(erlstore, object)) {
 		btreemap_remove(erlstore, object);
 
@@ -992,6 +1040,202 @@ boolean_t __lethe_remove_object_erl(
 	}
 
 	return B_FALSE;
+}
+
+// Queue an orphaned on-disk ERL object for lethe_sync phase B to free.
+// Takes ownership of `name`. Safe to call with the ERL locks held: the
+// purge mutex is never taken around anything that can block.
+void __lethe_queue_purge(spa_t *spa, struct Str name, uint64_t object) {
+	struct LethePurgeEntry entry = {
+		.name = name,
+		.object = object,
+	};
+
+	mutex_enter(&spa->lethe_purge_lock);
+	vec_push(&spa->lethe_purge_queue, entry);
+	mutex_exit(&spa->lethe_purge_lock);
+}
+
+void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
+	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+
+	// Drop the in-memory ERL; this also re-marks the object's slot in
+	// its master ERL, which is what makes the keys underivable after the
+	// next epoch patch.
+	boolean_t removed_store = __lethe_remove_object_erl(spa, objset, object);
+
+	// Remove the map entry (so a recycled object number never loads the
+	// stale ERL) and queue the backing object for freeing.
+	uint64_t erlobject = 0;
+	boolean_t removed_map = B_FALSE;
+	if (__lethe_object_erlmap_get(spa, objset, object, &erlobject)) {
+		VERIFY(__lethe_object_erlmap_remove(spa, objset, object));
+		__lethe_queue_purge(
+			spa,
+			__lethe_object_erl_name(objset, object),
+			erlobject
+		);
+		removed_map = B_TRUE;
+	}
+
+	// Belt and braces: if the ERL was mapped but not resident, the store
+	// removal above didn't mark the master; do it here.
+	if (removed_map && !removed_store) {
+		if (!__lethe_contains_master_erl(spa, objset)) {
+			VERIFY(__lethe_insert_master_erl(
+				spa,
+				objset,
+				erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
+			));
+		}
+		erl_mark_block(__lethe_get_master_erl(spa, objset), object);
+	}
+
+	if (removed_store || removed_map) {
+		lethe_info("objset: %llu, object: %llu purged\n", objset, object);
+		spa->lethe_epoch_dirty = B_TRUE;
+	}
+
+	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+}
+
+void lethe_object_free_range(
+	spa_t *spa,
+	uint64_t objset,
+	uint64_t object,
+	uint64_t start,
+	uint64_t end
+) {
+	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+
+	struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
+	if (erl != NULL) {
+		// Only blocks the ERL has ever keyed need re-marking; freeing
+		// beyond the written extent purges nothing.
+		uint64_t clamped = end < erl->blocks ? end : erl->blocks;
+		if (start < clamped) {
+			for (uint64_t b = start; b < clamped; b += 1) {
+				erl_mark_block(erl, b);
+			}
+
+			// The object ERL will be rewritten at sync; re-mark it
+			// under its master.
+			struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
+			VERIFY(master_erl != NULL);
+			erl_mark_block(master_erl, object);
+
+			lethe_info(
+				"objset: %llu, object: %llu, blocks [%llu, %llu) purged\n",
+				objset, object, start, clamped
+			);
+			spa->lethe_epoch_dirty = B_TRUE;
+		}
+	}
+
+	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+}
+
+void lethe_objset_destroy(spa_t *spa, uint64_t objset) {
+	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+
+	boolean_t purged = B_FALSE;
+
+	// Drop every in-memory ERL for the objset.
+	if (__lethe_remove_object_erlstore(spa, objset)) {
+		purged = B_TRUE;
+	}
+	if (__lethe_remove_master_erl(spa, objset)) {
+		purged = B_TRUE;
+	}
+
+	// Remove every object ERL map entry for the objset and queue the
+	// backing objects for freeing. Collect names first: removing while
+	// iterating would invalidate the nvlist iterator.
+	struct Str prefix = str_new();
+	{
+		char buf[21] = { 0 };
+		snprintf(buf, sizeof(buf), "%llu", (unsigned long long)objset);
+		str_push_raw(&prefix, "lethe_objset_");
+		str_push_raw(&prefix, buf);
+		str_push_raw(&prefix, "_object_");
+	}
+
+	vec(struct Str) names = vec_new();
+	nvpair_t *elem = NULL;
+	while ((elem = nvlist_next_nvpair(spa->lethe_object_erlmap, elem)) != NULL) {
+		if (strncmp(nvpair_name(elem), str_buf(&prefix),
+		    str_len(&prefix)) == 0) {
+			struct Str name = str_new();
+			str_push_raw(&name, nvpair_name(elem));
+			str_push(&name, '\0');
+			vec_push(&names, name);
+		}
+	}
+	str_drop(&prefix);
+
+	for (size_t i = 0; i < vec_len(&names); i += 1) {
+		uint64_t erlobject = 0;
+		VERIFY(__lethe_erlmap_get(
+			spa->lethe_object_erlmap,
+			str_buf(&names[i]),
+			&erlobject
+		));
+		VERIFY(__lethe_erlmap_remove(
+			spa->lethe_object_erlmap,
+			str_buf(&names[i])
+		));
+		__lethe_queue_purge(spa, names[i], erlobject);
+		purged = B_TRUE;
+	}
+	vec_drop(&names);
+
+	// Same for the objset's master ERL map entry.
+	{
+		uint64_t erlobject = 0;
+		if (__lethe_master_erlmap_get(spa, objset, &erlobject)) {
+			VERIFY(__lethe_master_erlmap_remove(spa, objset));
+			__lethe_queue_purge(
+				spa,
+				__lethe_master_erl_name(objset),
+				erlobject
+			);
+			purged = B_TRUE;
+		}
+	}
+
+	// Re-mark the objset's slot in the uber ERL: the next epoch patch
+	// makes the master ERL -- and everything keyed under it -- underivable.
+	if (purged) {
+		erl_mark_block(&spa->lethe_uber_erl, objset);
+		lethe_info("objset: %llu purged\n", objset);
+		spa->lethe_epoch_dirty = B_TRUE;
+	}
+
+	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
 }
 
 boolean_t __lethe_object_erlmap_contains(
