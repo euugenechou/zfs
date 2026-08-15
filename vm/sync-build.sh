@@ -15,16 +15,16 @@ set -euo pipefail
 SRC="${LETHE_SRC:-$HOME/lethe}"
 DST="${LETHE_BUILD:-$HOME/lethe-build}"
 
-mkdir -p "$DST"
-rsync -a --delete \
-	--exclude '.git' \
-	--exclude 'vm/' \
-	"$SRC"/ "$DST"/
-
 MODE="${1:-debug}"
 
 if [ "$MODE" = "perf" ]; then
 	DST="${LETHE_BUILD_PERF:-$HOME/lethe-build-perf}"
+	mkdir -p "$DST"
+	rsync -a --delete \
+		--exclude '.git' \
+		--exclude 'vm/' \
+		"$SRC"/ "$DST"/
+else
 	mkdir -p "$DST"
 	rsync -a --delete \
 		--exclude '.git' \

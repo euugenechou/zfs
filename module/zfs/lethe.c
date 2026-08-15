@@ -31,30 +31,28 @@ static uint64_t DEFAULT_FANOUTS_LEN = 3;
 void lethe_init(spa_t *spa) {
 	lethe_info("lethe_init(): start\n");
 
+	// One lock for all in-memory lethe state.
+	rw_init(&spa->lethe_lock, NULL, RW_DEFAULT, NULL);
+
 	// Initialize object ERL store fields.
-	rw_init(&spa->lethe_object_erlstore_lock, NULL, RW_DEFAULT, NULL);
 	spa->lethe_object_erlstore = hashmap_new();
 
 	// Initialize object ERL map fields.
 	spa->lethe_object_erlmap_object = 0;
 	spa->lethe_object_erlmap_loaded = B_FALSE;
-	rw_init(&spa->lethe_object_erlmap_lock, NULL, RW_DEFAULT, NULL);
 	nvlist_alloc(&spa->lethe_object_erlmap, NV_UNIQUE_NAME, KM_SLEEP);
 
 	// Initialize master ERL store fields.
-	rw_init(&spa->lethe_master_erlstore_lock, NULL, RW_DEFAULT, NULL);
 	spa->lethe_master_erlstore = btreemap_new();
 
 	// Initialize master ERL map fields.
 	spa->lethe_master_erlmap_object = 0;
 	spa->lethe_master_erlmap_loaded = B_FALSE;
-	rw_init(&spa->lethe_master_erlmap_lock, NULL, RW_DEFAULT, NULL);
 	nvlist_alloc(&spa->lethe_master_erlmap, NV_UNIQUE_NAME, KM_SLEEP);
 
 	// Initialize uber ERL fields.
 	spa->lethe_uber_erl_object = 0;
 	spa->lethe_uber_erl_loaded = B_FALSE;
-	rw_init(&spa->lethe_uber_erl_lock, NULL, RW_DEFAULT, NULL);
 	spa->lethe_uber_erl = erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN);
 
 	// Initialize purge queue fields.
@@ -73,24 +71,22 @@ void lethe_fini(spa_t *spa) {
 	lethe_info("lethe_fini(): start\n");
 
 	// Destroy object ERL store fields.
-	rw_destroy(&spa->lethe_object_erlstore_lock);
 	hashmap_drop(&spa->lethe_object_erlstore);
 
 	// Destroy object ERL map fields.
-	rw_destroy(&spa->lethe_object_erlmap_lock);
 	nvlist_free(spa->lethe_object_erlmap);
 
 	// Destroy master ERL store fields.
-	rw_destroy(&spa->lethe_master_erlstore_lock);
 	btreemap_drop(&spa->lethe_master_erlstore);
 
 	// Destroy master ERL map fields.
-	rw_destroy(&spa->lethe_master_erlmap_lock);
 	nvlist_free(spa->lethe_master_erlmap);
 
 	// Destroy uber ERL fields.
-	rw_destroy(&spa->lethe_uber_erl_lock);
 	erl_drop(&spa->lethe_uber_erl);
+
+	// One lock for all in-memory lethe state.
+	rw_destroy(&spa->lethe_lock);
 
 	// Destroy purge queue fields. Entries still queued here were never
 	// drained by a sync; their on-disk objects stay orphaned (harmless:
@@ -107,9 +103,7 @@ void lethe_fini(spa_t *spa) {
 void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 	lethe_info("lethe_setup(): start\n");
 
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
 	// Allocate root object and mark is as loaded.
 	spa->lethe_root_object = __lethe_alloc_root_object(spa, tx);
@@ -148,9 +142,7 @@ void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 	// Mark epoch as dirty since we have structures to sync.
 	spa->lethe_epoch_dirty = B_TRUE;
 
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 
 	lethe_info("lethe_setup(): end\n");
 }
@@ -158,11 +150,7 @@ void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 void lethe_load(spa_t *spa) {
 	lethe_info("lethe_load(): start\n");
 
-	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
 	__lethe_load_root(spa);
 	__lethe_load_uber_erl(spa);
@@ -170,17 +158,13 @@ void lethe_load(spa_t *spa) {
 	__lethe_load_object_erlmap(spa);
 
 	// Eagerly load every mapped ERL while we're in open context, where
-	// blocking on DMU I/O under the lethe locks is safe. This keeps the
+	// blocking on DMU I/O under the lethe lock is safe. This keeps the
 	// ZIO crypt path (lethe_bookmark_key) from ever having to fault an
 	// ERL in from disk: it runs in ZIO taskq context, where sleeping on
-	// I/O under these locks can starve the taskq and deadlock the pool.
+	// I/O under this lock can starve the taskq and deadlock the pool.
 	__lethe_load_all_erls(spa);
 
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 
 	lethe_info("lethe_load(): end\n");
 }
@@ -514,19 +498,11 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	vec(struct LetheSyncEntry) entries = vec_new();
 	vec(uint8_t) uber_bytes = vec_new();
 
-	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
 	// Nothing to sync if nothing was modified.
 	if (!spa->lethe_epoch_dirty) {
-		lethe_rw_exit(&spa->lethe_uber_erl_lock);
-		lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-		lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-		lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-		lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+		lethe_rw_exit(&spa->lethe_lock);
 		vec_drop(&entries);
 		return;
 	}
@@ -550,15 +526,11 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	// that happen after this point dirty the next epoch.
 	spa->lethe_epoch_dirty = B_FALSE;
 
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 
 	// Phase B: allocate backing objects and write everything out with no
-	// lethe locks held. The ERL maps are only re-locked briefly for the
-	// in-memory nvlist inserts/packs.
+	// lethe lock held. It's only re-taken briefly for the in-memory
+	// nvlist inserts/packs.
 	for (size_t i = 0; i < vec_len(&entries); i += 1) {
 		struct LetheSyncEntry *entry = &entries[i];
 
@@ -571,22 +543,22 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 				DMU_OTN_UINT64_METADATA
 			);
 			if (entry->is_master) {
-				lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
+				lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 				VERIFY(__lethe_master_erlmap_insert(
 					spa,
 					entry->objset,
 					entry->erlobject
 				));
-				lethe_rw_exit(&spa->lethe_master_erlmap_lock);
+				lethe_rw_exit(&spa->lethe_lock);
 			} else {
-				lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
+				lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 				VERIFY(__lethe_object_erlmap_insert(
 					spa,
 					entry->objset,
 					entry->object,
 					entry->erlobject
 				));
-				lethe_rw_exit(&spa->lethe_object_erlmap_lock);
+				lethe_rw_exit(&spa->lethe_lock);
 			}
 		}
 
@@ -801,7 +773,6 @@ void __lethe_sync_master_erlmap(spa_t *spa, dmu_tx_t *tx) {
 		spa,
 		tx,
 		spa->lethe_master_erlmap,
-		&spa->lethe_master_erlmap_lock,
 		spa->lethe_master_erlmap_object
 	);
 
@@ -815,7 +786,6 @@ void __lethe_sync_object_erlmap(spa_t *spa, dmu_tx_t *tx) {
 		spa,
 		tx,
 		spa->lethe_object_erlmap,
-		&spa->lethe_object_erlmap_lock,
 		spa->lethe_object_erlmap_object
 	);
 
@@ -826,12 +796,11 @@ void __lethe_sync_erlmap(
 	spa_t *spa,
 	dmu_tx_t *tx,
 	nvlist_t *nvp,
-	krwlock_t *lock,
 	uint64_t object
 ) {
-	// Pack the nvlist into contiguous memory under its lock; the DMU
-	// write below must happen with no lethe locks held (see lethe_sync).
-	lethe_rw_enter(lock, RW_READER);
+	// Pack the nvlist into contiguous memory under the lethe lock; the DMU
+	// write below must happen with no lethe lock held (see lethe_sync).
+	lethe_rw_enter(&spa->lethe_lock, RW_READER);
 
 	uint64_t size = 0;
 	nvlist_size(nvp, (size_t *)&size, NV_ENCODE_XDR);
@@ -839,7 +808,7 @@ void __lethe_sync_erlmap(
 	char *packed_nvp = kmem_alloc(size, KM_SLEEP);
 	nvlist_pack(nvp, &packed_nvp, (size_t *)&size, NV_ENCODE_XDR, KM_SLEEP);
 
-	lethe_rw_exit(lock);
+	lethe_rw_exit(&spa->lethe_lock);
 
 	// Write to the DMU.
 	dmu_write(spa->spa_meta_objset, object, 0, size, packed_nvp, tx,
@@ -1064,11 +1033,7 @@ void __lethe_queue_purge(spa_t *spa, struct Str name, uint64_t object) {
 }
 
 void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
-	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
 	// Drop the in-memory ERL; this also re-marks the object's slot in
 	// its master ERL, which is what makes the keys underivable after the
@@ -1107,11 +1072,7 @@ void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
 		spa->lethe_epoch_dirty = B_TRUE;
 	}
 
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 }
 
 void lethe_object_free_range(
@@ -1121,11 +1082,7 @@ void lethe_object_free_range(
 	uint64_t start,
 	uint64_t end
 ) {
-	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
 	struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
 	if (erl != NULL) {
@@ -1151,19 +1108,11 @@ void lethe_object_free_range(
 		}
 	}
 
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 }
 
 void lethe_objset_destroy(spa_t *spa, uint64_t objset) {
-	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
 	boolean_t purged = B_FALSE;
 
@@ -1238,11 +1187,7 @@ void lethe_objset_destroy(spa_t *spa, uint64_t objset) {
 		spa->lethe_epoch_dirty = B_TRUE;
 	}
 
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 }
 
 boolean_t __lethe_object_erlmap_contains(
@@ -1389,17 +1334,16 @@ struct KhtKey lethe_bookmark_key(
 
     // This runs in ZIO taskq context (zio_encrypt on write issue,
     // zio_decrypt on read completion). Two rules keep it deadlock-free:
-    // no blocking DMU I/O may happen under the lethe locks (ERLs are
+    // no blocking DMU I/O may happen under the lethe lock (ERLs are
     // loaded eagerly at import; see __lethe_load_all_erls), and the
     // vmalloc-based KHT allocations below must not recurse into
     // filesystem reclaim, hence the fstrans mark.
     fstrans_cookie_t cookie = spl_fstrans_mark();
 
-    lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-    lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	// Reads are pure key derivation (no marking/creation/loading, since
+	// Task 4): safe to take the lock shared. Writes mark ERL slots and
+	// may create/load structures, so they still need the writer.
+	lethe_rw_enter(&spa->lethe_lock, read ? RW_READER : RW_WRITER);
 
 	struct KhtKey key = __lethe_block_key(
 		spa,
@@ -1409,11 +1353,7 @@ struct KhtKey lethe_bookmark_key(
 		bookmark->zb_blkid
 	);
 
-    lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-    lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 
     spl_fstrans_unmark(cookie);
 
@@ -1431,11 +1371,8 @@ struct KhtKey lethe_bookmark_prev_key(
 	// with the forest (folded) key rather than the current tree key.
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 
-	lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
+	// Lookup + erl_block_prev_key are pure after Task 3: safe as a reader.
+	lethe_rw_enter(&spa->lethe_lock, RW_READER);
 
 	struct KhtKey key = khtkey_new();
 	struct Erl *erl = __lethe_get_object_erl(
@@ -1447,11 +1384,7 @@ struct KhtKey lethe_bookmark_prev_key(
 		key = erl_block_prev_key(erl, bookmark->zb_blkid);
 	}
 
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_master_erlstore_lock);
+	lethe_rw_exit(&spa->lethe_lock);
 
 	spl_fstrans_unmark(cookie);
 

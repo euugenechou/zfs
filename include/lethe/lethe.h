@@ -257,15 +257,14 @@ void __lethe_sync_object_erlmap(spa_t *spa, dmu_tx_t *tx);
 void __lethe_sync_master_erlmap(spa_t *spa, dmu_tx_t *tx);
 
 /// General function for syncing an ERL map (`nvp`) during transaction `tx`.
-/// The ERL map is packed (under `lock`, which must not already be held by the
-/// caller) and stored in the object with the specified ID (`object`) under the
-/// MOS pointed to by the `spa`. The DMU write happens with no lethe locks
-/// held.
+/// The ERL map is packed (under `spa->lethe_lock`, which must not already be
+/// held by the caller) and stored in the object with the specified ID
+/// (`object`) under the MOS pointed to by the `spa`. The DMU write happens
+/// with no lethe lock held.
 void __lethe_sync_erlmap(
 	spa_t *spa,
 	dmu_tx_t *tx,
 	nvlist_t *nvp,
-	krwlock_t *lock,
 	uint64_t object
 );
 

@@ -462,30 +462,29 @@ struct spa {
         boolean_t lethe_root_object_loaded;     // Root object loaded?
         boolean_t lethe_epoch_dirty;            // Epoch modifications to sync?
 
+	// One lock for all in-memory lethe state (ERL stores, maps, uber).
+	// Readers: pure key derivation (decrypt). Writers: everything else.
+	krwlock_t lethe_lock;
+
 	// Lethe: uber ERL fields
 	uint64_t lethe_uber_erl_object;         // On-disk uber ERL object.
 	boolean_t lethe_uber_erl_loaded;        // Was uber ERL loaded?
-	krwlock_t lethe_uber_erl_lock;          // Lock for uber ERL.
 	struct Erl lethe_uber_erl;              // In-memory uber ERL.
 
 	// Lethe: master ERL map fields
 	uint64_t lethe_master_erlmap_object;    // On-disk master ERL map object.
 	boolean_t lethe_master_erlmap_loaded;   // Was master ERL map loaded?
-	krwlock_t lethe_master_erlmap_lock;     // Lock for master ERL map.
 	nvlist_t *lethe_master_erlmap;          // In-memory master ERL map.
 
 	// Lethe: object ERL map fields
 	uint64_t lethe_object_erlmap_object;    // On-disk object ERL map object.
 	boolean_t lethe_object_erlmap_loaded;   // Was object ERL map loaded?
-	krwlock_t lethe_object_erlmap_lock;     // Lock for object ERL map.
 	nvlist_t *lethe_object_erlmap;          // In-memory object ERL map.
 
 	// Lethe: master ERL store fields
-	krwlock_t lethe_master_erlstore_lock;   // Lock for master ERL store.
 	struct BTreeMap lethe_master_erlstore;  // In-memory master ERL store.
 
 	// Lethe: object ERL store fields
-	krwlock_t lethe_object_erlstore_lock;   // Lock for object ERL store.
 	struct HashMap lethe_object_erlstore;   // In-memory object ERL store.
 
 	// Lethe: purge queue fields. On-disk ERL objects orphaned by key
