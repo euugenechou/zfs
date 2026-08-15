@@ -1493,6 +1493,8 @@ struct KhtKey __lethe_block_key(
 			erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
 		);
 	}
+	ASSERT(!__lethe_master_erlmap_contains(spa, objset) ||
+	    __lethe_contains_master_erl(spa, objset));
 	if (!__lethe_contains_master_erl(spa, objset)) {
 		__lethe_insert_master_erl(
 			spa,
