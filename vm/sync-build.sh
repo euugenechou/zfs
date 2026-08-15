@@ -4,8 +4,11 @@
 #
 #   vm/sync-build.sh            # sync + configure (first time) + make
 #   vm/sync-build.sh sync       # sync only
+#   vm/sync-build.sh perf       # sync + configure (non-debug) + make into
+#                                # ~/lethe-build-perf, for fio baselines
 #
 # Build tree: ~/lethe-build (VM-local; never on the virtiofs mount).
+# Perf build tree: ~/lethe-build-perf (VM-local, non-debug).
 
 set -euo pipefail
 
@@ -18,13 +21,28 @@ rsync -a --delete \
 	--exclude 'vm/' \
 	"$SRC"/ "$DST"/
 
-[ "${1:-}" = "sync" ] && exit 0
+MODE="${1:-debug}"
+
+if [ "$MODE" = "perf" ]; then
+	DST="${LETHE_BUILD_PERF:-$HOME/lethe-build-perf}"
+	mkdir -p "$DST"
+	rsync -a --delete \
+		--exclude '.git' \
+		--exclude 'vm/' \
+		"$SRC"/ "$DST"/
+fi
+
+[ "$MODE" = "sync" ] && exit 0
 
 cd "$DST"
 if [ ! -x configure ]; then
 	./autogen.sh
 fi
 if [ ! -f Makefile ]; then
-	./configure --enable-debug --enable-debuginfo
+	if [ "$MODE" = "perf" ]; then
+		./configure --enable-debuginfo
+	else
+		./configure --enable-debug --enable-debuginfo
+	fi
 fi
 make -s -j"$(nproc)"

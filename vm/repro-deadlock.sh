@@ -59,3 +59,5 @@ fi
 
 echo "=== new kernel messages ==="
 dmesg | tail -n +$((dmesg_start + 1)) | tail -200
+
+exit $rc
