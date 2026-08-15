@@ -51,9 +51,16 @@ harnesses in `vm/erl_harness.c` / `vm/erl_minimize.c` / `vm/khf_test.c`.
 
 Known remaining limitations: sparse-file folds (ranges beyond the forest
 extent) are untested; L2ARC writes (`zio_do_crypt_abd` callers) don't use
-Lethe keys — keep L2ARC off; a crash loses the current epoch's unsynced
-key state (data written in the final un-captured txg would be unreadable —
-same class as the ZIL issue; needs a key-state journal to fix properly).
+Lethe keys — keep L2ARC off; crash recovery is analytically sound
+(purge/rotation state commits in the same txg as the data it keys) but
+crash-injection testing hasn't been done; snapshots/clones/dedup/raw-send
+are unsupported.
+
+Update 2026-08-14 (later): delete-path key purging is implemented and
+tested — file delete, truncate, and dataset destroy now rotate the
+relevant key slots at the next epoch (see `vm/delete-purge-design.md`,
+`vm/erl_delete_test.c`, `vm/test-delete.sh`). Run with
+`zfs_delete_inode=1` / `zfs_delete_dentry=1` for rm-time purging.
 
 ---
 
