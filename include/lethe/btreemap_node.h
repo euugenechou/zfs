@@ -55,3 +55,12 @@ BTREEMAP_KEY_TYPE btreemapnode_max_key(struct BTreeMapNode *self);
 BTREEMAP_VAL_TYPE btreemapnode_max_val(struct BTreeMapNode *self);
 
 void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree);
+
+// Removes `key` from the subtree rooted at `self`, moving its value out to
+// `*out` (single ownership transfer -- no drop). Returns true if `key` was
+// found and removed, false (with `*out` untouched) otherwise. This is the
+// primitive `btreemapnode_delete()` is built on: it exists so that internal
+// predecessor/successor promotion (cases 2a/2b) can move a value up through
+// the tree exactly once instead of bit-copying it (aliasing the original)
+// and then separately dropping the alias found by recursion.
+bool btreemapnode_extract(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree, BTREEMAP_VAL_TYPE *out);

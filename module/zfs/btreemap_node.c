@@ -254,16 +254,27 @@ BTREEMAP_VAL_TYPE btreemapnode_max_val(struct BTreeMapNode *self) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wframe-larger-than="
 #endif
-void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree) {
+// Removes `key` from the subtree rooted at `self`, moving its value out to
+// `*out` instead of dropping it. Every path below performs a true,
+// single-owner move of BTREEMAP_VAL_TYPE (an Erl, which owns heap state):
+// either a vec_remove() straight into `*out`, or a recursive extract() that
+// lands the value directly in its final resting slot. Nothing is ever
+// bit-copied into two live locations at once, unlike the old
+// btreemapnode_delete(), whose cases 2a/2b copied a predecessor/successor's
+// value into self->vals[i] *and* then recursed into a delete() that
+// erl_drop()'d that very same Erl out from under the copy (a
+// use-after-free once the copy was later used or dropped), while also
+// silently leaking the original self->vals[i] it overwrote without
+// dropping.
+bool btreemapnode_extract(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree, BTREEMAP_VAL_TYPE *out) {
     BTREEMAP_VAL_TYPE val;
     uint64_t i = btreemapnode_find_index(self, key);
 
     // Case 1: Key found in node and node is a leaf.
     if (i < btreemapnode_len(self) && self->keys[i] == key && btreemapnode_is_leaf(self)) {
         vec_remove(&self->keys, i, &key);
-        vec_remove(&self->vals, i, &val);
-        erl_drop(&val);
-        return;
+        vec_remove(&self->vals, i, out);
+        return true;
     }
 
     // Case 2: Key found in node and node is an internal node.
@@ -273,14 +284,31 @@ void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint6
 
         if (btreemapnode_len(pred) >= degree) {
             // Case 2a: Child node that precedes k has at least t keys.
+            // The entry being deleted moves out to *out; the promoted
+            // predecessor value is extracted directly into its new home
+            // (self->vals[i]), never existing in two places at once.
+            *out = self->vals[i];
             self->keys[i] = btreemapnode_max_key(pred);
-            self->vals[i] = btreemapnode_max_val(pred);
-            btreemapnode_delete(pred, self->keys[i], degree);
+#ifdef __KERNEL__
+            BUG_ON(!btreemapnode_extract(pred, self->keys[i], degree, &self->vals[i]));
+#else
+            {
+                bool found = btreemapnode_extract(pred, self->keys[i], degree, &self->vals[i]);
+                assert(found);
+            }
+#endif
         } else if (btreemapnode_len(succ) >= degree) {
             // Case 2b: Child node that succeeds k has at least t keys.
+            *out = self->vals[i];
             self->keys[i] = btreemapnode_min_key(succ);
-            self->vals[i] = btreemapnode_min_val(succ);
-            btreemapnode_delete(succ, self->keys[i], degree);
+#ifdef __KERNEL__
+            BUG_ON(!btreemapnode_extract(succ, self->keys[i], degree, &self->vals[i]));
+#else
+            {
+                bool found = btreemapnode_extract(succ, self->keys[i], degree, &self->vals[i]);
+                assert(found);
+            }
+#endif
         } else {
             // Case 2c: Successor and predecessor only have t - 1 keys.
             struct BTreeMapNode succ;
@@ -302,15 +330,15 @@ void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint6
             // Merge any children into predecessor and drop successor.
             vec_append(&pred->children, &succ.children);
             btreemapnode_drop(&succ);
-            btreemapnode_delete(pred, key, degree);
+            return btreemapnode_extract(pred, key, degree, out);
         }
 
-        return;
+        return true;
     }
 
     // If on a leaf, then no appropriate subtree contains the key.
     if (btreemapnode_is_leaf(self)) {
-        return;
+        return false;
     }
 
     // Case 3: Key not found in internal node.
@@ -415,7 +443,14 @@ void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint6
         }
     }
 
-    btreemapnode_delete(&self->children[i], key, degree);
+    return btreemapnode_extract(&self->children[i], key, degree, out);
+}
+
+void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree) {
+    BTREEMAP_VAL_TYPE val;
+    if (btreemapnode_extract(self, key, degree, &val)) {
+        erl_drop(&val);
+    }
 }
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
