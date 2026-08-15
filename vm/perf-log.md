@@ -92,7 +92,7 @@ to get a clean reimport for this measurement; the big win from read
 purification is qualitative (read-only epochs no longer rewrite every
 touched ERL), not visible in these steady-state bandwidth numbers.
 
-## Step A: single reader-shared rwlock (commit <hash>)
+## Step A: single reader-shared rwlock (commit f0226fbe3)
 
 ```
 ### randread jobs=1
