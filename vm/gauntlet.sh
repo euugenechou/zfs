@@ -13,7 +13,7 @@ run() { echo "=== $* ==="; "$@"; local rc=$?; \
 cd "$BUILD"
 
 # Userspace harnesses (compiled fresh from the synced build tree).
-for t in erl_harness khf_test erl_delete_test erl_readpure_test btreemap_delete_test; do
+for t in erl_harness khf_test erl_delete_test erl_readpure_test btreemap_delete_test erl_sparse_test; do
 	[ -f "$SRC/vm/$t.c" ] || continue
 	if gcc -O1 -g -I include -o "/tmp/$t" "$SRC/vm/$t.c" \
 		module/zfs/kht_*.c module/zfs/btree?*.c module/zfs/str.c \

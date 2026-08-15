@@ -205,20 +205,55 @@ void khf_overwrite_keyed(struct Khf *self, uint64_t start, uint64_t end, struct 
     vec(struct KhtRoot) patch = vec_new();
     struct KhtRoot *patch_root = NULL;
 
-    uint64_t patch_start = 0;
+    // Find the root whose real, structural coverage contains `start`. If no
+    // root's end exceeds `start`, the loop falls through without breaking:
+    // `start` lies beyond every existing root's actual coverage (a genuine
+    // gap/extension, not a split of any existing root).
+    bool start_found = false;
+    uint64_t patch_start = vec_len(&self->roots);
     for (uint64_t i = 0; i < vec_len(&self->roots); i += 1) {
         patch_start = i;
         patch_root = &self->roots[i];
         if (start < khtshape_end(&self->shape, &patch_root->pos)) {
+            start_found = true;
             break;
         }
     }
 
-    if (khtshape_start(&self->shape, &patch_root->pos) != start) {
-        vec(struct KhtRoot) roots =
-            khf_coverage(self, patch_root, khtshape_start(&self->shape, &patch_root->pos), start);
-        vec_append(&patch, &roots);
-        vec_drop(&roots);
+    if (start_found) {
+        if (khtshape_start(&self->shape, &patch_root->pos) != start) {
+            // Genuine split of an existing root: patch_root really is the
+            // structural ancestor of [patch_root_start, start), so folding
+            // that sub-range from patch_root's own key is valid.
+            vec(struct KhtRoot) roots = khf_coverage(
+                self, patch_root, khtshape_start(&self->shape, &patch_root->pos), start
+            );
+            vec_append(&patch, &roots);
+            vec_drop(&roots);
+        }
+    } else if (self->leaves < start) {
+        // `start` is beyond the forest's known extent: [self->leaves,
+        // start) was never covered by any root, so there is no existing
+        // key material to preserve there. khf_derive_key()/khtpath_next()
+        // never validate that a root is actually the ancestor of a target
+        // position -- deriving this gap from `patch_root` (the last,
+        // unrelated root) would silently produce wrong keys, and if the
+        // gap's coverage decomposition ever regroups an existing leaf-level
+        // root into a coarser node, khtpath_next()'s from.level >= to.level
+        // short-circuit returns that root's key completely unhashed,
+        // corrupting its own previously-correct derivation too. Extend with
+        // a fresh, independently-random key instead, exactly like
+        // khf_append_keyed does when growing the forest.
+        struct KhtRoot fresh = khtroot_with_key(khtkey_new());
+        vec(struct KhtRoot) gap = khf_coverage(self, &fresh, self->leaves, start);
+        vec_append(&patch, &gap);
+        vec_drop(&gap);
+    }
+
+    if (!start_found) {
+        // Nothing in self->roots actually covers up to `start`: preserve
+        // every existing root as-is (none of them are being split).
+        patch_start = vec_len(&self->roots);
     }
 
     vec_drain(&roots, &self->roots, 0, patch_start);
@@ -228,7 +263,8 @@ void khf_overwrite_keyed(struct Khf *self, uint64_t start, uint64_t end, struct 
     vec_drop(&coverage);
 
     uint64_t patch_end = vec_len(&self->roots);
-    if (end < khtshape_end(&self->shape, &self->roots[vec_len(&self->roots) - 1].pos)) {
+    if (vec_len(&self->roots) > 0 &&
+        end < khtshape_end(&self->shape, &self->roots[vec_len(&self->roots) - 1].pos)) {
         for (uint64_t i = 0; i < vec_len(&self->roots); i += 1) {
             patch_end = i + 1;
             patch_root = &self->roots[i];
