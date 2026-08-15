@@ -23,7 +23,7 @@ struct BTreeMapNode btreemapnode_new(void) {
 
 void btreemapnode_drop(struct BTreeMapNode *self) {
     for (uint64_t i = 0; i < vec_len(&self->vals); i += 1) {
-        erl_drop(&self->vals[i]);
+        erlbox_drop(self->vals[i]);
     }
 
     for (uint64_t i = 0; i < vec_len(&self->children); i += 1) {
@@ -449,7 +449,7 @@ bool btreemapnode_extract(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint
 void btreemapnode_delete(struct BTreeMapNode *self, BTREEMAP_KEY_TYPE key, uint64_t degree) {
     BTREEMAP_VAL_TYPE val;
     if (btreemapnode_extract(self, key, degree, &val)) {
-        erl_drop(&val);
+        erlbox_drop(val);
     }
 }
 #if defined(__GNUC__)

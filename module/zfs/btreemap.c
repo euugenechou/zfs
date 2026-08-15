@@ -96,7 +96,7 @@ BTREEMAP_VAL_TYPE *btreemap_get(struct BTreeMap *self, BTREEMAP_KEY_TYPE key) {
 
 void btreemap_insert(struct BTreeMap *self, BTREEMAP_KEY_TYPE key, BTREEMAP_VAL_TYPE val) {
     if (btreemap_contains(self, key)) {
-        erl_drop(&val);
+        erlbox_drop(val);
         return;
     }
 
@@ -166,7 +166,7 @@ vec(uint8_t) btreemap_serialize(struct BTreeMap *self) {
             key >>= 8;
         }
 
-        vec(uint8_t) val_bytes = erl_serialize(val);
+        vec(uint8_t) val_bytes = erl_serialize(&(*val)->erl);
         vec_append(&bytes, &val_bytes);
         vec_drop(&val_bytes);
     }
@@ -199,7 +199,7 @@ struct BTreeMap btreemap_deserialize(vec(uint8_t) *bytes) {
         vec_flush(bytes, 0, sizeof(uint64_t));
 
         struct Erl val = erl_deserialize(bytes);
-        btreemap_insert(&self, key, val);
+        btreemap_insert(&self, key, erlbox_new(val));
     }
 
     return self;

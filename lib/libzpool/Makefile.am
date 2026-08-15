@@ -213,6 +213,7 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/hex.c \
 	module/zfs/kht_coverage.c \
 	module/zfs/kht_erl.c \
+	module/zfs/kht_erlbox.c \
 	module/zfs/kht_forest.c \
 	module/zfs/kht_key.c \
 	module/zfs/kht_path.c \

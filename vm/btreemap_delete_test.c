@@ -29,6 +29,7 @@
 //       module/zfs/str.c module/zfs/speck.c module/zfs/sha.c module/zfs/hex.c
 #include <lethe/btreemap.h>
 #include <lethe/kht_erl.h>
+#include <lethe/kht_erlbox.h>
 #include <lethe/kht_key.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -78,14 +79,14 @@ static void lcg_shuffle(uint64_t *arr, uint64_t n) {
 // Verify that a surviving key's Erl is intact: non-NULL and its recorded
 // block write-keys are still derivable via erl_block_read_key.
 static void check_key(struct BTreeMap *map, uint64_t key, const char *stage) {
-    struct Erl *erl = btreemap_get(map, key);
-    if (!erl) {
+    struct ErlBox **box = btreemap_get(map, key);
+    if (!box) {
         printf("FAIL: %s: key %" PRIu64 " missing but should survive\n", stage, key);
         failures++;
         return;
     }
     for (int b = 0; b < NBLOCKS; b += 1) {
-        struct KhtKey k = erl_block_read_key(erl, (uint64_t)b);
+        struct KhtKey k = erl_block_read_key(&(*box)->erl, (uint64_t)b);
         if (memcmp(k.bytes, recorded[key][b].bytes, KHT_KEY_SIZE) != 0) {
             printf("FAIL: %s: key %" PRIu64 " block %d value corrupted\n", stage, key, b);
             failures++;
@@ -120,7 +121,7 @@ int main(void) {
         for (int b = 0; b < NBLOCKS; b += 1) {
             recorded[key][b] = erl_block_read_key(&erl, (uint64_t)b);
         }
-        btreemap_insert(&map, key, erl);
+        btreemap_insert(&map, key, erlbox_new(erl));
         alive[key] = 1;
     }
 

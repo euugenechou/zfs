@@ -1,11 +1,19 @@
 #pragma once
 
-#include <lethe/btreemap.h>
-#include <lethe/hashmap.h>
-#include <lethe/kht.h>
+// sys/dsl_crypt.h (via dmu_tx.h/dmu.h/zfs_context.h) pulls in the Linux
+// kernel headers (linux/module.h -> ... -> linux/mmzone.h) that use the
+// kernel's own single-argument mutex_init() in inline function bodies.
+// lethe/btreemap.h transitively includes lethe/kht_erlbox.h, which on
+// __KERNEL__ includes the SPL's <sys/mutex.h> and its 4-argument
+// mutex_init() macro. That macro must not be visible yet when the Linux
+// mmzone.h headers are parsed, or its single-argument callers fail to
+// compile -- hence the sys/* includes come first here.
 #include <sys/dsl_crypt.h>
 #include <sys/spa.h>
 #include <sys/zio.h>
+#include <lethe/btreemap.h>
+#include <lethe/hashmap.h>
+#include <lethe/kht.h>
 
 //! This file contains the API for Lethe, which, at its heart, is an efficient
 //! key management scheme designed to provide secure deletion through
@@ -305,19 +313,19 @@ boolean_t __lethe_contains_master_erl(spa_t *spa, uint64_t objset);
 /// Gets the object ERL store identified by object set ID (`objset`).
 struct BTreeMap *__lethe_get_object_erlstore(spa_t *spa, uint64_t objset);
 
-/// Gets the object ERL identified by object set ID (`objset`) and object ID
-/// (`object`). Calling this won't load the object ERL even if the object ERL
-/// map contains a mapping to it in the `spa`.
-struct Erl *__lethe_get_object_erl(
+/// Gets the object ERL box identified by object set ID (`objset`) and object
+/// ID (`object`). Calling this won't load the object ERL even if the object
+/// ERL map contains a mapping to it in the `spa`.
+struct ErlBox *__lethe_get_object_erl(
 	spa_t *spa,
 	uint64_t objset,
 	uint64_t object
 );
 
-/// Gets the master ERL identified by object set ID (`objset`). Calling this
-/// won't load the master ERL even if the master ERL map contains a mapping to
-/// it in the `spa`.
-struct Erl *__lethe_get_master_erl(
+/// Gets the master ERL box identified by object set ID (`objset`). Calling
+/// this won't load the master ERL even if the master ERL map contains a
+/// mapping to it in the `spa`.
+struct ErlBox *__lethe_get_master_erl(
 	spa_t *spa,
 	uint64_t objset
 );

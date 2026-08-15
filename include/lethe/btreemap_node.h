@@ -2,10 +2,12 @@
 
 #ifdef __KERNEL__
     #include <lethe/kht.h>
+    #include <lethe/kht_erlbox.h>
     #include <lethe/vec.h>
     #include <linux/types.h>
 #else
     #include <lethe/kht.h>
+    #include <lethe/kht_erlbox.h>
     #include <lethe/vec.h>
     #include <stdbool.h>
     #include <stddef.h>
@@ -13,7 +15,7 @@
 #endif
 
 #define BTREEMAP_KEY_TYPE uint64_t
-#define BTREEMAP_VAL_TYPE struct Erl
+#define BTREEMAP_VAL_TYPE struct ErlBox *
 
 struct BTreeMapNode {
     vec(BTREEMAP_KEY_TYPE) keys;

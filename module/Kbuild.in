@@ -460,6 +460,7 @@ ZFS_OBJS := \
 	hex.o \
 	kht_coverage.o \
 	kht_erl.o \
+	kht_erlbox.o \
 	kht_forest.o \
 	kht_key.o \
 	kht_path.o \

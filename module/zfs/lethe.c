@@ -607,23 +607,27 @@ void __lethe_capture_object_erlstore(
 ) {
 	lethe_info("(start)\n");
 
-	// Iterate over the master ERL store.
+	// Iterate over the master ERL store. btreemapiter_next()'s `val` out
+	// parameter is a pointer to the stored BTREEMAP_VAL_TYPE (struct
+	// ErlBox *) slot -- same double-pointer shape as btreemap_get()'s
+	// return, per the BTREEMAP_VAL_TYPE * / ** convention used elsewhere
+	// in this file (e.g. btreemap.c's own iteration).
 	uint64_t objset = 0;
-	struct Erl *master_erl = NULL;
+	struct ErlBox **master_box = NULL;
 	struct BTreeMapIter master_iter = btreemap_iter(&spa->lethe_master_erlstore);
 
-	while (btreemapiter_next(&master_iter, &objset, &master_erl)) {
+	while (btreemapiter_next(&master_iter, &objset, &master_box)) {
 		// Iterate over each of the modified objects.
 		uint64_t object = 0;
-		struct BTreeSetIter object_iter = btreeset_iter(&master_erl->modified);
+		struct BTreeSetIter object_iter = btreeset_iter(&(*master_box)->erl.modified);
 
 		while (btreesetiter_next(&object_iter, &object)) {
 			// A purged object (lethe_object_free) is marked under
 			// its master but its ERL is gone: there is nothing to
 			// serialize, and the master patch below rotating its
 			// slot IS the purge.
-			struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
-			if (erl == NULL) {
+			struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
+			if (box == NULL) {
 				continue;
 			}
 
@@ -648,12 +652,12 @@ void __lethe_capture_object_erlstore(
 			}
 
 			// Patch the modified ERL, then reset for next epoch.
-			erl_patch(erl);
-			erl_reset(erl);
+			erl_patch(&box->erl);
+			erl_reset(&box->erl);
 
 			// Get the ERL's key, then serialize and encrypt it.
 			struct KhtKey key = __lethe_object_erl_write_key(spa, objset, object);
-			entry.bytes = erl_serialize_keyed(erl, &key);
+			entry.bytes = erl_serialize_keyed(&box->erl, &key);
 
 #if defined(__KERNEL__) && defined(DEBUG)
 			{
@@ -686,16 +690,18 @@ void __lethe_capture_master_erlstore(
 ) {
 	lethe_info("(start)\n");
 
-	// Iterate over the master ERL store.
+	// Iterate over the master ERL store. See the analogous comment in
+	// __lethe_capture_object_erlstore() on why `master_box` is a double
+	// pointer here.
 	uint64_t objset = 0;
-	struct Erl *master_erl = NULL;
+	struct ErlBox **master_box = NULL;
 	struct BTreeMapIter iter = btreemap_iter(&spa->lethe_master_erlstore);
 
-	while (btreemapiter_next(&iter, &objset, &master_erl)) {
+	while (btreemapiter_next(&iter, &objset, &master_box)) {
 		// A master with no modified objects had no object ERLs
 		// captured this epoch: nothing below it changed, its slot
 		// keys are all still derivable, skip the rewrite.
-		if (btreeset_is_empty(&master_erl->modified)) {
+		if (btreeset_is_empty(&(*master_box)->erl.modified)) {
 			continue;
 		}
 
@@ -713,12 +719,12 @@ void __lethe_capture_master_erlstore(
 		}
 
 		// Patch the modified master ERL and reset it for the next epoch.
-		erl_patch(master_erl);
-		erl_reset(master_erl);
+		erl_patch(&(*master_box)->erl);
+		erl_reset(&(*master_box)->erl);
 
 		// Get the master ERL's key, then serialize and encrypt it.
 		struct KhtKey key = __lethe_master_erl_write_key(spa, objset);
-		entry.bytes = erl_serialize_keyed(master_erl, &key);
+		entry.bytes = erl_serialize_keyed(&(*master_box)->erl, &key);
 
 #if defined(__KERNEL__) && defined(DEBUG)
 		{
@@ -883,20 +889,25 @@ struct BTreeMap *__lethe_get_object_erlstore(spa_t *spa, uint64_t objset) {
 	return hashmap_get(&spa->lethe_object_erlstore, objset);
 }
 
-struct Erl *__lethe_get_object_erl(
+struct ErlBox *__lethe_get_object_erl(
 	spa_t *spa,
 	uint64_t objset,
 	uint64_t object
 ) {
 	struct BTreeMap *erlstore = __lethe_get_object_erlstore(spa, objset);
-	return erlstore ? btreemap_get(erlstore, object) : NULL;
+	if (erlstore == NULL) {
+		return NULL;
+	}
+	struct ErlBox **box = btreemap_get(erlstore, object);
+	return box ? *box : NULL;
 }
 
-struct Erl *__lethe_get_master_erl(
+struct ErlBox *__lethe_get_master_erl(
 	spa_t *spa,
 	uint64_t objset
 ) {
-	return btreemap_get(&spa->lethe_master_erlstore, objset);
+	struct ErlBox **box = btreemap_get(&spa->lethe_master_erlstore, objset);
+	return box ? *box : NULL;
 }
 
 boolean_t __lethe_insert_object_erlstore(
@@ -925,7 +936,7 @@ boolean_t __lethe_insert_object_erl(
 
 	// Insert object's ERL into its ERL store if it doesn't exist.
 	if (!btreemap_contains(erlstore, object)) {
-		btreemap_insert(erlstore, object, erl);
+		btreemap_insert(erlstore, object, erlbox_new(erl));
 
 		// Create master ERL for the object's object set if it doesn't exist.
 		if (!__lethe_contains_master_erl(spa, objset)) {
@@ -937,8 +948,8 @@ boolean_t __lethe_insert_object_erl(
 		}
 
 		// Mark object as newly added (modified) under its master ERL.
-		struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
-		erl_mark_block(master_erl, object);
+		struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
+		erl_mark_block(&master_box->erl, object);
 
 		return B_TRUE;
 	}
@@ -954,7 +965,7 @@ boolean_t __lethe_insert_master_erl(
 	lethe_info("objset = %llu (start)\n", objset);
 	if (!btreemap_contains(&spa->lethe_master_erlstore, objset)) {
 		lethe_info("objset = %llu (end)\n", objset);
-		btreemap_insert(&spa->lethe_master_erlstore, objset, erl);
+		btreemap_insert(&spa->lethe_master_erlstore, objset, erlbox_new(erl));
 		return B_TRUE;
 	}
 	lethe_info("objset = %llu (end)\n", objset);
@@ -1009,8 +1020,8 @@ boolean_t __lethe_remove_object_erl(
 		}
 
 		// Mark object as removed (modified) under its master ERL.
-		struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
-		erl_mark_block(master_erl, object);
+		struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
+		erl_mark_block(&master_box->erl, object);
 
 		return B_TRUE;
 	}
@@ -1064,7 +1075,8 @@ void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
 				erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
 			));
 		}
-		erl_mark_block(__lethe_get_master_erl(spa, objset), object);
+		struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
+		erl_mark_block(&master_box->erl, object);
 	}
 
 	if (removed_store || removed_map) {
@@ -1084,21 +1096,21 @@ void lethe_object_free_range(
 ) {
 	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
 
-	struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
-	if (erl != NULL) {
+	struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
+	if (box != NULL) {
 		// Only blocks the ERL has ever keyed need re-marking; freeing
 		// beyond the written extent purges nothing.
-		uint64_t clamped = end < erl->blocks ? end : erl->blocks;
+		uint64_t clamped = end < box->erl.blocks ? end : box->erl.blocks;
 		if (start < clamped) {
 			for (uint64_t b = start; b < clamped; b += 1) {
-				erl_mark_block(erl, b);
+				erl_mark_block(&box->erl, b);
 			}
 
 			// The object ERL will be rewritten at sync; re-mark it
 			// under its master.
-			struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
-			VERIFY(master_erl != NULL);
-			erl_mark_block(master_erl, object);
+			struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
+			VERIFY(master_box != NULL);
+			erl_mark_block(&master_box->erl, object);
 
 			lethe_info(
 				"objset: %llu, object: %llu, blocks [%llu, %llu) purged\n",
@@ -1375,13 +1387,13 @@ struct KhtKey lethe_bookmark_prev_key(
 	lethe_rw_enter(&spa->lethe_lock, RW_READER);
 
 	struct KhtKey key = khtkey_new();
-	struct Erl *erl = __lethe_get_object_erl(
+	struct ErlBox *box = __lethe_get_object_erl(
 		spa,
 		bookmark->zb_objset,
 		bookmark->zb_object
 	);
-	if (erl != NULL) {
-		key = erl_block_prev_key(erl, bookmark->zb_blkid);
+	if (box != NULL) {
+		key = erl_block_prev_key(&box->erl, bookmark->zb_blkid);
 	}
 
 	lethe_rw_exit(&spa->lethe_lock);
@@ -1410,11 +1422,11 @@ struct KhtKey __lethe_block_key(
 	// random key makes the upstream MAC check fail loudly without
 	// allocating read-side state.
 	if (read) {
-		struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
-		if (erl == NULL) {
+		struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
+		if (box == NULL) {
 			return khtkey_new();
 		}
-		return erl_block_read_key(erl, block);
+		return erl_block_read_key(&box->erl, block);
 	}
 
 	// Writes create state on first touch.
@@ -1436,14 +1448,14 @@ struct KhtKey __lethe_block_key(
 		);
 	}
 
-	struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
-	struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
+	struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
+	struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
 
 	// Mark the object as modified so its ERL is captured this epoch.
-	erl_mark_block(master_erl, object);
+	erl_mark_block(&master_box->erl, object);
 	spa->lethe_epoch_dirty = B_TRUE;
 
-	return erl_block_write_key(erl, block);
+	return erl_block_write_key(&box->erl, block);
 }
 
 struct KhtKey __lethe_object_erl_read_key(
@@ -1471,10 +1483,10 @@ struct KhtKey __lethe_object_erl_key(
 	if (!__lethe_contains_master_erl(spa, objset)) {
 		__lethe_load_master_erl(spa, objset);
 	}
-	struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
+	struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
 
-	struct KhtKey key = read ? erl_block_read_key(master_erl, object)
-	                         : erl_block_write_key(master_erl, object);
+	struct KhtKey key = read ? erl_block_read_key(&master_box->erl, object)
+	                         : erl_block_write_key(&master_box->erl, object);
 
 	return key;
 }
