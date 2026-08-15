@@ -93,18 +93,22 @@ static inline uint64_t max(uint64_t x, uint64_t y) {
 
 struct KhtKey khf_node_key(struct Khf *self, struct KhtPos *n) {
     if (khf_is_consolidated(self)) {
-        self->leaves = max(self->leaves, khtshape_end(&self->shape, n));
         return khf_derive_key(self, &self->roots[0], n);
     }
 
+    // A query beyond the forest extent is a block this forest never
+    // covered. Reads must NOT extend the forest (appending here is what
+    // historically corrupted the sorted-roots invariant); return a
+    // random key so the caller's MAC check fails loudly instead.
     if (self->leaves < khtshape_end(&self->shape, n)) {
-        khf_append(self, khtshape_end(&self->shape, n) - self->leaves);
+        return khtkey_new();
     }
 
     uint64_t size = vec_len(&self->roots);
     uint64_t left = 0;
     uint64_t right = size;
     uint64_t index = 0;
+    bool found = false;
 
     while (left < right) {
         uint64_t mid = left + size / 2;
@@ -112,6 +116,7 @@ struct KhtKey khf_node_key(struct Khf *self, struct KhtPos *n) {
 
         if (khtshape_is_ancestor(&self->shape, &root->pos, n)) {
             index = mid;
+            found = true;
             break;
         } else if (khtshape_end(&self->shape, &root->pos) <= khtshape_start(&self->shape, n)) {
             left = mid + 1;
@@ -122,12 +127,13 @@ struct KhtKey khf_node_key(struct Khf *self, struct KhtPos *n) {
         size = right - left;
     }
 
-    // Grow (never shrink) the tracked extent, mirroring the consolidated
-    // branch above. Shrinking here made every lookup clamp `leaves` to the
-    // queried block, so the next lookup would khf_append() random-keyed
-    // junk roots, breaking the sorted-roots invariant the binary search
-    // depends on and corrupting all subsequent key derivations.
-    self->leaves = max(self->leaves, khtshape_end(&self->shape, n));
+    // An in-extent query with no covering root means the sorted-roots
+    // invariant broke; deriving from roots[0] would silently produce a
+    // wrong key.
+    if (!found) {
+        return khtkey_new();
+    }
+
     return khf_derive_key(self, &self->roots[index], n);
 }
 

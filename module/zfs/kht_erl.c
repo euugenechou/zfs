@@ -68,7 +68,9 @@ struct KhtKey erl_block_write_key(struct Erl *self, uint64_t block) {
 
 struct KhtKey erl_block_read_key(struct Erl *self, uint64_t block) {
     if (btreeset_contains(&self->modified, block)) {
-        return erl_block_write_key(self, block);
+        // Marked this epoch: the current tree key. Derive directly --
+        // reads must not touch the modified set or block count.
+        return kht_leaf_key(&self->tree, block);
     } else {
         return khf_leaf_key(&self->forest, block);
     }
