@@ -454,26 +454,6 @@ boolean_t __lethe_master_erlmap_remove(
 /// ERL map (`nvp`). Trying to remove a non-existent mapping results in failure.
 boolean_t __lethe_erlmap_remove(nvlist_t *nvp, const char *name);
 
-/// Generates a block read key from the object ERL store in the `spa`. The block
-/// the key is designated for is identified by object set ID (`objset`), object
-/// ID (`object`), and block ID (`block`).
-struct KhtKey lethe_block_read_key(
-	spa_t *spa,
-	uint64_t objset,
-	uint64_t object,
-	uint64_t block
-);
-
-/// Generates a block write key from the object ERL store in the `spa`. The block
-/// the key is designated for is identified by object set ID (`objset`), object
-/// ID (`object`), and block ID (`block`).
-struct KhtKey lethe_block_write_key(
-	spa_t *spa,
-	uint64_t objset,
-	uint64_t object,
-	uint64_t block
-);
-
 /// Generates a block-level key from the object ERL store in the `spa` given a
 /// `bookmark` used in the ZIO layer. The generated key is a read key if `read`
 /// is true. Otherwise, it's a write key.

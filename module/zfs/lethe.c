@@ -720,6 +720,13 @@ void __lethe_capture_master_erlstore(
 	struct BTreeMapIter iter = btreemap_iter(&spa->lethe_master_erlstore);
 
 	while (btreemapiter_next(&iter, &objset, &master_erl)) {
+		// A master with no modified objects had no object ERLs
+		// captured this epoch: nothing below it changed, its slot
+		// keys are all still derivable, skip the rewrite.
+		if (btreeset_is_empty(&master_erl->modified)) {
+			continue;
+		}
+
 		struct LetheSyncEntry entry = {
 			.is_master = B_TRUE,
 			.objset = objset,
@@ -1373,66 +1380,6 @@ boolean_t __lethe_erlmap_remove(nvlist_t *nvp, const char *name) {
 	return nvlist_remove_all(nvp, name) == 0;
 }
 
-struct KhtKey lethe_block_read_key(
-	spa_t *spa,
-	uint64_t objset,
-	uint64_t object,
-	uint64_t block
-) {
-    lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-    lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
-
-	struct KhtKey key = __lethe_block_key(
-		spa,
-		B_TRUE,
-		objset,
-		object,
-		block
-	);
-
-    lethe_rw_exit(&spa->lethe_master_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-    lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-
-	return key;
-}
-
-struct KhtKey lethe_block_write_key(
-	spa_t *spa,
-	uint64_t objset,
-	uint64_t object,
-	uint64_t block
-) {
-    lethe_rw_enter(&spa->lethe_master_erlstore_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlstore_lock, RW_WRITER);
-    lethe_rw_enter(&spa->lethe_master_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_object_erlmap_lock, RW_WRITER);
-	lethe_rw_enter(&spa->lethe_uber_erl_lock, RW_WRITER);
-
-	lethe_info("(start)\n");
-	struct KhtKey key = __lethe_block_key(
-		spa,
-		B_FALSE,
-		objset,
-		object,
-		block
-	);
-	lethe_info("(end)\n");
-
-    lethe_rw_exit(&spa->lethe_master_erlstore_lock);
-	lethe_rw_exit(&spa->lethe_object_erlstore_lock);
-    lethe_rw_exit(&spa->lethe_master_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_object_erlmap_lock);
-	lethe_rw_exit(&spa->lethe_uber_erl_lock);
-
-	return key;
-}
-
 struct KhtKey lethe_bookmark_key(
 	spa_t *spa,
 	boolean_t read,
@@ -1518,12 +1465,26 @@ struct KhtKey __lethe_block_key(
 	uint64_t object,
 	uint64_t block
 ) {
-	// If a mapping to the object ERL supplying the key exists, load it.
-	if (__lethe_object_erlmap_contains(spa, objset, object)) {
-		__lethe_load_object_erl(spa, objset, object);
+	// Eager import loading (__lethe_load_all_erls) guarantees every
+	// mapped ERL is resident, so the hot path never consults the
+	// nvlist maps and never loads (no DMU I/O under the lethe locks,
+	// by construction).
+	ASSERT(!__lethe_object_erlmap_contains(spa, objset, object) ||
+	    __lethe_contains_object_erl(spa, objset, object));
+
+	// Reads are pure: look up and derive, touching nothing. A missing
+	// ERL means lethe never keyed this block (or purged it); the
+	// random key makes the upstream MAC check fail loudly without
+	// allocating read-side state.
+	if (read) {
+		struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
+		if (erl == NULL) {
+			return khtkey_new();
+		}
+		return erl_block_read_key(erl, block);
 	}
 
-	// If the object's ERL doesn't exist, create it.
+	// Writes create state on first touch.
 	if (!__lethe_contains_object_erl(spa, objset, object)) {
 		__lethe_insert_object_erl(
 			spa,
@@ -1532,13 +1493,6 @@ struct KhtKey __lethe_block_key(
 			erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
 		);
 	}
-
-	// If a mapping to the object's master ERL exists, load it.
-	if (__lethe_master_erlmap_contains(spa, objset)) {
-		__lethe_load_master_erl(spa, objset);
-	}
-
-	// If the object's master ERL doesn't exist, create it.
 	if (!__lethe_contains_master_erl(spa, objset)) {
 		__lethe_insert_master_erl(
 			spa,
@@ -1547,31 +1501,14 @@ struct KhtKey __lethe_block_key(
 		);
 	}
 
-	// Get the object's ERL and its master ERL.
 	struct Erl *erl = __lethe_get_object_erl(spa, objset, object);
 	struct Erl *master_erl = __lethe_get_master_erl(spa, objset);
 
-	// Mark the object as modified and the object ERL store as dirty.
+	// Mark the object as modified so its ERL is captured this epoch.
 	erl_mark_block(master_erl, object);
 	spa->lethe_epoch_dirty = B_TRUE;
 
-	// Generate appropriate key.
-	struct KhtKey key = read ? erl_block_read_key(erl, block)
-	                         : erl_block_write_key(erl, block);
-
-	// Sanity logging.
-	// struct Str s = khtkey_to_string(&key);
-	// lethe_info(
-	// 	"lethe_block_%s_key(): {\n"
-	// 	"    %.*s\n"
-	// 	"}\n",
-	// 	read ? "read" : "write",
-	// 	(int)str_len(&s),
-	// 	str_buf(&s)
-	// );
-	// str_drop(&s);
-
-	return key;
+	return erl_block_write_key(erl, block);
 }
 
 struct KhtKey __lethe_object_erl_read_key(
