@@ -252,3 +252,26 @@ per-erl-locking regression from rig/host noise. Flagged as an open
 concern rather than folded into the stepA/stepC conclusions above;
 needs a rerun on a quiet host (no other Lima VMs active) before acting
 on it.
+
+### Resolution: quiet-host interleaved A/C comparison (2026-08-15)
+
+Rerun with all other Lima VMs stopped (host load 0.00 at start), then an
+interleaved same-rig-state comparison: three back-to-back jobs=8 randrw
+samples on the Step C binary (HEAD 5793a9798), then the Step A binary
+(ec583648c, rebuilt and reloaded, srcversion-verified) on the same
+still-warm rig. randrw READ/WRITE MiB/s:
+
+| binary | jobs=8 s1 | jobs=8 s2 | jobs=8 s3 | jobs=4 |
+|--------|-----------:|-----------:|-----------:|--------:|
+| step C | 95.3/97.0 | 94.6/96.0 | 94.9/96.3 | 102/104 |
+| step A | 94.2/95.8 | 94.0/95.5 | 94.2/94.2 | 82.2/83.8 |
+
+Run-to-run spread within a binary is +-0.4%; step C matches step A at
+jobs=8 within that noise (marginally ahead) and beats it at jobs=4 in
+the single paired sample. Verdict: NO step-C regression -- the open
+jobs=4/8 concern from the first repeat sample is closed. The earlier
+124-126 MiB/s jobs=8 readings (both binaries) came from a different rig
+state (fresher VM boot); absolute throughput on this rig drifts up to
+~30% across sessions, so only interleaved same-session comparisons are
+meaningful here. Paper benchmarking must interleave configurations
+within one session rather than trusting cross-session absolute numbers.
