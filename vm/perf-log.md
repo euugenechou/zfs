@@ -50,6 +50,10 @@ read number.
 
 ## Step 0: read purification (commit bcd4723e1)
 
+Heading hash is the measurement HEAD (includes the 5a/5b bug fixes
+required for a clean reimport at this step); the actual read-path
+purification code commits are a854b8a49/13c041929.
+
 ```
 ### randread jobs=1
 perf: (groupid=0, jobs=1): err= 0: pid=110579: Sat Aug 15 15:24:56 2026

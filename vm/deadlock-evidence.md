@@ -63,9 +63,10 @@ relevant key slots at the next epoch (see `vm/delete-purge-design.md`,
 `zfs_delete_inode=1` / `zfs_delete_dentry=1` for rm-time purging.
 
 Update 2026-08-15: the locking-granularity project is done. Step 0
-(commit bcd4723e1) purified the read path (no marking, no creation, no
-lazy load on reads) so read-only epochs stop rewriting every touched
-ERL. Step A (commit f0226fbe3) collapsed the five global lethe rwlocks
+(commits a854b8a49/13c041929) purified the read path (no marking, no
+creation, no lazy load on reads) so read-only epochs stop rewriting
+every touched ERL. Step A (commit f0226fbe3) collapsed the five global
+lethe rwlocks
 that caused the deadlock above into one, taken `RW_READER` for decrypt
 derivations and `RW_WRITER` for encrypt/write/purge/sync — the 120s
 8-job reader/writer-mixing fio deadlock reproducer that used to wedge
@@ -87,13 +88,16 @@ READER could orphan an object's ERL — before it shipped; fixed by
 restoring WRITER there (commit 176ef3f53). Final validation: three
 consecutive 60s create/delete-vs-read churn runs (`vm/test-churn.sh`,
 thousands of churn cycles each) all pass clean, and the full gauntlet
-(`vm/gauntlet.sh`) passes end to end. Perf (`vm/perf-log.md`): steady-
-state randrw bandwidth holds within a few MiB/s of baseline across
-jobs=1/2/8 through all steps, but jobs=4 shows a dip under stepC (117/
-119 MiB/s stepA -> 110/112 stepC) that reproduces and widens on a
-repeat sample (103/105) alongside a new jobs=8 dip not seen the first
-time, coincident with heavy host contention from other VMs during that
-run — flagged as an open, unresolved concern rather than a settled
+(`vm/gauntlet.sh`) passes end to end. Perf (`vm/perf-log.md`): in each
+step's first (uncontended) sample, steady-state randrw bandwidth holds
+within a few MiB/s of baseline at jobs=1/2/8, but jobs=4 shows a dip
+under stepC (117/119 MiB/s stepA -> 110/112 stepC) that reproduces and
+widens on a second, separately-run repeat sample (103/105); that
+repeat sample also shows a new jobs=8 dip not seen in any first
+sample, coincident with heavy host contention from other VMs running
+during that repeat — so the jobs=1/2/8 "holds within noise" claim
+above describes only the uncontended first samples, not the contended
+repeat. Flagged as an open, unresolved concern rather than a settled
 regression, since the structural goal (no more pool-wide writer
 exclusion) isn't measurable in this single-threaded-per-job fio shape
 anyway.
