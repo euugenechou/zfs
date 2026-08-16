@@ -217,3 +217,34 @@ lock-contention-bound (see stepA's note above), so the scoped structure
 lock's payoff is in reducing reader/writer exclusion under real
 concurrent load (the gauntlet's mixed workloads), not in this
 single-threaded-per-job fio shape.
+
+### Step C repeat sample
+
+Second 30s randrw sample (task 9), same rig/methodology, to confirm or
+dismiss the jobs=4 dip above. Paired table, READ/WRITE MiB/s:
+
+| jobs | stepA READ | stepA WRITE | stepC READ | stepC WRITE | stepC-repeat READ | stepC-repeat WRITE |
+|-----:|------------:|-------------:|------------:|-------------:|--------------------:|---------------------:|
+| 1    | 140         | 140          | 139         | 140          | 139                 | 139                  |
+| 2    | 103         | 104          | 102         | 102          | 102                 | 103                  |
+| 4    | 117         | 119          | 110         | 112          | 103                 | 105                  |
+| 8    | 124         | 126          | 124         | 126          | 97.7                | 99.2                 |
+
+jobs=1 and jobs=2 hold within noise of both prior stepC and stepA.
+jobs=4's dip reproduces and widens (stepA 117/119 -> stepC 110/112 ->
+repeat 103/105, ~12% below stepA), consistent in direction with the
+original sample. jobs=8, which matched stepA exactly in the first
+stepC sample, dips hard in the repeat (124/126 -> 97.7/99.2, ~21%) --
+a point that showed no problem at all the first time. This run's VM
+load average was 6.9 on 8 vCPUs with two other Lima VMs (`engelq`,
+`ldd`) running concurrently on the host, which is enough host-level
+contention to plausibly explain a broad, load-dependent dip that grows
+with job count rather than a lock-contention effect specific to jobs=4.
+Verdict: inconclusive, leaning noise -- the jobs=4 direction is
+consistent across both samples, but the new jobs=8 dip in a slot that
+was previously clean, combined with confirmed host contention during
+this sample, means this single repeat can't cleanly separate a real
+per-erl-locking regression from rig/host noise. Flagged as an open
+concern rather than folded into the stepA/stepC conclusions above;
+needs a rerun on a quiet host (no other Lima VMs active) before acting
+on it.

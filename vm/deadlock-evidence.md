@@ -62,6 +62,42 @@ relevant key slots at the next epoch (see `vm/delete-purge-design.md`,
 `vm/erl_delete_test.c`, `vm/test-delete.sh`). Run with
 `zfs_delete_inode=1` / `zfs_delete_dentry=1` for rm-time purging.
 
+Update 2026-08-15: the locking-granularity project is done. Step 0
+(commit bcd4723e1) purified the read path (no marking, no creation, no
+lazy load on reads) so read-only epochs stop rewriting every touched
+ERL. Step A (commit f0226fbe3) collapsed the five global lethe rwlocks
+that caused the deadlock above into one, taken `RW_READER` for decrypt
+derivations and `RW_WRITER` for encrypt/write/purge/sync — the 120s
+8-job reader/writer-mixing fio deadlock reproducer that used to wedge
+now exits clean. Step C (commits 97e80146e/32207f534) went further:
+ErlBoxes behind stable pointers with embedded per-box content mutexes,
+and the single lock scoped down to just structure changes (`RW_READER`
+for derivations, `RW_WRITER` for create/purge/load), so writers no
+longer exclude each other pool-wide. Two latent bugs were found and
+fixed along the way, both pre-existing and unrelated to this project's
+own changes but blocking clean measurement: a btreemap internal-node
+delete double-drop (bit-copied predecessor/successor Erls were dropped
+twice — commit 816944def) and a `khf_overwrite_keyed` sparse-fold gap
+that silently corrupted a real block's key when a new range's start
+fell outside every existing root's coverage (commit bcd4723e1). Code
+review of the Step C READER-demotion for `lethe_object_free_range`
+caught a real capture-atomicity race — phase A's two capture passes
+aren't jointly atomic, so a free_range landing between them under
+READER could orphan an object's ERL — before it shipped; fixed by
+restoring WRITER there (commit 176ef3f53). Final validation: three
+consecutive 60s create/delete-vs-read churn runs (`vm/test-churn.sh`,
+thousands of churn cycles each) all pass clean, and the full gauntlet
+(`vm/gauntlet.sh`) passes end to end. Perf (`vm/perf-log.md`): steady-
+state randrw bandwidth holds within a few MiB/s of baseline across
+jobs=1/2/8 through all steps, but jobs=4 shows a dip under stepC (117/
+119 MiB/s stepA -> 110/112 stepC) that reproduces and widens on a
+repeat sample (103/105) alongside a new jobs=8 dip not seen the first
+time, coincident with heavy host contention from other VMs during that
+run — flagged as an open, unresolved concern rather than a settled
+regression, since the structural goal (no more pool-wide writer
+exclusion) isn't measurable in this single-threaded-per-job fio shape
+anyway.
+
 ---
 
 # Original deadlock reproduction evidence (2026-08-14)
