@@ -100,7 +100,14 @@ above describes only the uncontended first samples, not the contended
 repeat. Flagged as an open, unresolved concern rather than a settled
 regression, since the structural goal (no more pool-wide writer
 exclusion) isn't measurable in this single-threaded-per-job fio shape
-anyway.
+anyway. Final whole-branch review found one more pre-existing race of
+the same shape: `lethe_sync` phase B could map-insert (or write) a
+freshly-allocated ERL object for an entry whose box was freed by an
+open-context `lethe_object_free`/`lethe_objset_destroy` between phase
+A's READER release and phase B's WRITER, orphaning it the same way;
+fixed by re-checking residency under phase B's WRITER before inserting
+the map entry and queuing the object for purge-drain instead when the
+box is gone.
 
 ---
 

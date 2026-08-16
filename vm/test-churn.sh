@@ -15,6 +15,13 @@ check() {
 	if [ "$1" -eq 0 ]; then echo "ok: $2"; else echo "FAIL: $2"; FAILS=$((FAILS+1)); fi
 }
 
+reimport() {
+	sudo ./zpool export $POOL &&
+	sudo ./zpool import -d /var/tmp $POOL &&
+	echo "lethe-passphrase" | sudo ./zfs load-key -a &&
+	sudo ./zfs mount -a
+}
+
 cd "$BUILD"
 sudo ./zpool destroy $POOL 2>/dev/null
 sudo ./scripts/zfs.sh -u 2>/dev/null
@@ -60,6 +67,19 @@ sudo ./zpool sync $POOL
 sudo ./zpool scrub -w $POOL
 sudo ./zpool status $POOL | grep "with 0 errors" >/dev/null
 check $? "scrub clean"
+
+# Orphaned-map/wrong-key corruption from delete-vs-sync races only
+# manifests at import (stale map entry -> load -> wrong-key decrypt),
+# so a clean in-pool scrub isn't sufficient: force an export/import/
+# load-key/mount cycle and re-verify the control file survives it.
+reimport
+check $? "reimport after churn"
+
+[ "$(sudo md5sum "$MNT/control" | cut -d' ' -f1)" = "$C1" ]
+check $? "control file intact after churn+reimport"
+
+sudo dmesg | grep -iE "oops|kernel bug|general protection|page fault" >/dev/null
+[ $? -ne 0 ]; check $? "no kernel splats in dmesg after reimport"
 
 sudo ./zpool destroy $POOL
 echo "=== $([ $FAILS -eq 0 ] && echo PASS || echo "FAIL ($FAILS)") ==="

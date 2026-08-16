@@ -552,6 +552,7 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	// the in-memory nvlist inserts/packs.
 	for (size_t i = 0; i < vec_len(&entries); i += 1) {
 		struct LetheSyncEntry *entry = &entries[i];
+		boolean_t orphaned = B_FALSE;
 
 		if (entry->erlobject == 0) {
 			entry->erlobject = __lethe_alloc_object(
@@ -561,29 +562,63 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 				DMU_OTN_UINT8_METADATA,
 				DMU_OTN_UINT64_METADATA
 			);
+
+			lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
+
+			// Pre-existing race, found in final review: this entry's
+			// erlobject was 0 in phase A, meaning its box was first
+			// captured this epoch with no backing object yet. Between
+			// phase A's READER release and this WRITER, an open-context
+			// lethe_object_free/lethe_objset_destroy may have removed
+			// the box (and, for the map-entry case, already queued its
+			// old backing object for purge) -- nothing owns the object
+			// we just allocated above. Re-check residency before
+			// mapping it in: if the box is gone, queue the fresh object
+			// for purge instead of publishing a map entry that points
+			// at an ERL nobody will ever patch again (its key would go
+			// stale at the next epoch rotation and BUG_ON on import).
+			boolean_t resident;
 			if (entry->is_master) {
-				lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
+				resident = __lethe_contains_master_erl(
+				    spa, entry->objset);
+			} else {
+				resident = __lethe_contains_object_erl(
+				    spa, entry->objset, entry->object);
+			}
+
+			if (!resident) {
+				orphaned = B_TRUE;
+				__lethe_queue_purge(spa, entry->name, entry->erlobject);
+			} else if (entry->is_master) {
 				VERIFY(__lethe_master_erlmap_insert(
 					spa,
 					entry->objset,
 					entry->erlobject
 				));
-				lethe_rw_exit(&spa->lethe_struct_lock);
 			} else {
-				lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 				VERIFY(__lethe_object_erlmap_insert(
 					spa,
 					entry->objset,
 					entry->object,
 					entry->erlobject
 				));
-				lethe_rw_exit(&spa->lethe_struct_lock);
 			}
+
+			lethe_rw_exit(&spa->lethe_struct_lock);
 		}
 
-		__lethe_sync_erl_object(spa, tx, entry->erlobject, &entry->bytes);
-
-		str_drop(&entry->name);
+		// Note: the symmetric already-mapped case (erlobject != 0, box
+		// freed mid-sync) isn't handled here -- lethe_object_free with
+		// removed_map == TRUE already queued the old object for purge
+		// and removed the map entry before phase A ever ran, so this
+		// entry wouldn't exist at all. The only way to still see a
+		// stale write below is a free that lands AFTER phase A already
+		// captured a live box: harmless, since the purge drain frees
+		// the object in this same txg -- just a wasted write.
+		if (!orphaned) {
+			__lethe_sync_erl_object(spa, tx, entry->erlobject, &entry->bytes);
+			str_drop(&entry->name);
+		}
 		vec_drop(&entry->bytes);
 	}
 	vec_drop(&entries);

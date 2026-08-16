@@ -75,14 +75,17 @@ can run it under shared/reader locking.
   which falls out of the existing write-key path.)
 - Read-miss semantics change: decrypting a block with no ERL currently
   creates a fresh ERL and derives a garbage key (upstream MAC check
-  fails). New behavior: return the zero key without creating anything --
-  same observable failure, no read-side allocation. ERLs are created
-  only on the write path.
+  fails). New behavior: return a fresh random key without creating
+  anything -- same observable failure (the MAC check still fails; a
+  random key is also non-constant, unlike a zero key, so it can't
+  become an accidental oracle), no read-side allocation. ERLs are
+  created only on the write path.
 - Hygiene: delete dead `lethe_block_read_key`/`lethe_block_write_key`;
   replace the lazy `__lethe_load_object_erl()` call inside
-  `__lethe_block_key()` with a VERIFY (mapped implies resident, by
-  eager import loading), making the no-I/O-under-locks invariant hold by
-  construction.
+  `__lethe_block_key()` with an invariant check (mapped implies
+  resident, by eager import loading), making the no-I/O-under-locks
+  invariant hold by construction. Shipped as `ASSERT`s (debug builds
+  only), per the implementation plan -- not `VERIFY`s.
 
 ## Step A: one rwlock, readers share
 
@@ -141,10 +144,12 @@ protect *contents*.
   an earlier draft of this doc (and the task brief) called it out as
   safe under READER + the object box mutex -- it is not; WRITER is
   required for capture-atomicity, not shape.
-- **Lock order: `lethe_struct_lock`(R) -> object box -> master box.**
-  Never the reverse. The uber ERL needs no box (it lives by value in
-  spa_t and is never moved by a container); it gets a dedicated kmutex
-  ordered at the same level as a master box.
+- **Lock order: `lethe_struct_lock`(R) -> object box -> master box ->
+  uber.** Never the reverse. The uber ERL needs no box (it lives by
+  value in spa_t and is never moved by a container); it gets a
+  dedicated kmutex, but that kmutex nests *inside* a master box, not
+  beside it -- master capture and `__lethe_master_erl_key()` take the
+  uber lock while still holding the master box mutex.
 - Derivation: lock the object box; read = pure derive; write = mark +
   derive; unlock; then (write only) lock the master box, mark the
   object's slot, unlock.
