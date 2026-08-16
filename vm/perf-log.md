@@ -275,3 +275,32 @@ state (fresher VM boot); absolute throughput on this rig drifts up to
 ~30% across sessions, so only interleaved same-session comparisons are
 meaningful here. Paper benchmarking must interleave configurations
 within one session rather than trusting cross-session absolute numbers.
+
+## Lethe vs stock OpenZFS (zfs-2.4.3, 2026-08-15, quiet host)
+
+Stock upstream at the merge-base (83020cf82) built with the same
+non-debug config (`~/zfs-stock-build` in the VM, via git archive), then
+interleaved module-swap sweeps in one session, fresh pool per build,
+sweep order enc/plain/enc so each build gets a fresh-file and an aged
+(reused-file) encrypted sample. randrw READ/WRITE MiB/s:
+
+| config             | stock       | lethe       | lethe delta |
+|--------------------|-------------|-------------|-------------|
+| enc jobs=1 (fresh) | 132/132     | 123/123     | -7%         |
+| enc jobs=1 (aged)  | 54.8/54.9   | 50.8/50.6   | -7%         |
+| enc jobs=8 (1st)   | 101/103     | 92.9/94.7   | -8%         |
+| enc jobs=8 (2nd)   | 101/103     | 89.3/90.8   | -11%        |
+| plain jobs=1       | 1826/1824   | 1331/1331   | (noise)     |
+| plain jobs=8       | 1125/1124   | 909/909     | (noise)     |
+
+Headline: Lethe costs ~7-11% over stock native encryption on randrw,
+consistent across fresh/aged files and jobs=1/8. Context: encryption
+itself costs ~10-20x vs unencrypted on this cache-hot file-vdev rig
+(stock plain 1125 -> stock enc 101 at jobs=8), so the KHF/locking
+overhead is small relative to the crypto baseline. The plain-dataset
+deltas are NOT a lethe regression: lethe hooks are dead on unencrypted
+datasets, and plain-run variance at GiB/s cache speeds is >25% between
+consecutive identical runs (lethe-build plain jobs=1 measured 1457 then
+1130 earlier the same session). Also note the fresh-vs-aged encrypted
+gap (132 -> 55 at jobs=1) dwarfs the lethe delta -- benchmark protocols
+must fix file age when comparing.
