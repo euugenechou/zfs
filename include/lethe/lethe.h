@@ -488,14 +488,6 @@ struct KhtKey __lethe_object_erl_read_key(
 	uint64_t object
 );
 
-/// Generates the write key for the object ERL specified by the given object set
-/// ID (`objset`) and object ID (`object`).
-struct KhtKey __lethe_object_erl_write_key(
-	spa_t *spa,
-	uint64_t objset,
-	uint64_t object
-);
-
 /// Generates the key for the object ERL specified by the given object set ID
 /// (`objset`) and object ID (`object`). If `read` is true, the generated key is
 /// a read key. Otherwise, it's a write key.

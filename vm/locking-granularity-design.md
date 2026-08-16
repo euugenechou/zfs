@@ -128,6 +128,19 @@ protect *contents*.
   creation, `lethe_object_free`, `lethe_objset_destroy`, import load.
   Rare and short; free-after-remove is trivially safe because WRITER
   excludes all derivations.
+- `lethe_object_free_range` also takes WRITER, even though it only
+  marks content (no box is created, moved, or freed). It is not the
+  "structural" exception it looks like: `lethe_sync` phase A's two
+  capture passes (see below) are not jointly atomic, and
+  `lethe_object_free_range` runs in *open context* (`dnode_free_range`
+  during truncate), concurrently with a sync in progress. A mark
+  landing under READER between phase A's object-store pass and its
+  master-store pass can tag a master slot for an object whose ERL was
+  never captured that epoch, silently orphaning it on disk (undecryptable
+  at next import). Review of Task 8's implementation caught this after
+  an earlier draft of this doc (and the task brief) called it out as
+  safe under READER + the object box mutex -- it is not; WRITER is
+  required for capture-atomicity, not shape.
 - **Lock order: `lethe_struct_lock`(R) -> object box -> master box.**
   Never the reverse. The uber ERL needs no box (it lives by value in
   spa_t and is never moved by a container); it gets a dedicated kmutex

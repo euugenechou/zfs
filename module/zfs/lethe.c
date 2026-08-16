@@ -505,6 +505,21 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	// derivations on untouched ERLs proceed. Clear the dirty flag
 	// FIRST: a write that lands mid-capture re-sets it and simply gets
 	// captured next epoch (its marks survive in the modified sets).
+	//
+	// Load-bearing invariant: capture's two passes below
+	// (__lethe_capture_object_erlstore then __lethe_capture_master_
+	// erlstore) are NOT jointly atomic -- the first snapshots each
+	// master's modified set and releases its box mutex before the
+	// second re-reads that set live. Nothing besides the ordinary
+	// write path (lethe_bookmark_key, which marks a master slot only
+	// for the same object it just captured a key for) may mutate an
+	// ERL's content or a master's modified set while phase A is in
+	// flight. Every other mutator -- lethe_object_free,
+	// lethe_object_free_range, lethe_objset_destroy -- MUST hold
+	// lethe_struct_lock WRITER, which phase A's READER excludes, or a
+	// mark can land between the two passes and orphan an object ERL
+	// (see lethe_object_free_range's lock comment for the concrete
+	// race this caught in review).
 	if (atomic_swap_32(&spa->lethe_epoch_dirty, 0) == 0) {
 		vec_drop(&entries);
 		vec_drop(&uber_bytes);
@@ -1140,11 +1155,22 @@ void lethe_object_free_range(
 	uint64_t start,
 	uint64_t end
 ) {
-	// Only marks a content range on one object ERL; nothing structural
-	// changes, so READER + the object box mutex suffices (unlike
-	// lethe_object_free/lethe_objset_destroy, which remove containers
-	// and need WRITER).
-	lethe_rw_enter(&spa->lethe_struct_lock, RW_READER);
+	// WRITER, not READER: this must NOT run concurrently with lethe_sync
+	// phase A. Phase A's two capture passes are not jointly atomic --
+	// __lethe_capture_object_erlstore snapshots each master's modified
+	// set once and releases the master box mutex, but
+	// __lethe_capture_master_erlstore re-reads that set LIVE afterward.
+	// A free_range landing between those two passes (under READER) can
+	// mark this object's slot in the master AFTER the object snapshot
+	// already missed it: the master then gets patched/reset/rewritten
+	// as if this object's ERL were re-serialized this epoch, but it
+	// never was. That silently orphans the on-disk object ERL -- its
+	// key becomes underivable at the next import. Only WRITER (which
+	// phase A never runs under) keeps the mark-then-capture ordering
+	// unambiguous. All in-memory marks below, no I/O under the lock, so
+	// WRITER is deadlock-safe here exactly as it is in
+	// lethe_object_free/lethe_objset_destroy.
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 
 	struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
 	if (box != NULL) {
@@ -1472,6 +1498,19 @@ retry:
 
 	if (!read) {
 		// Object box -> master box is the sanctioned order.
+		//
+		// This mark-under-READER is safe against lethe_sync phase A
+		// only because zio_encrypt (the sole caller of this write
+		// branch) runs inside dsl_pool_sync()'s I/O issue/wait
+		// convergence, which is serialized against lethe_sync in the
+		// same txg -- there is no open-context caller of the write
+		// path the way lethe_object_free_range is an open-context
+		// (dnode_free_range/truncate) caller of the free path. If a
+		// future change ever calls this write branch from open
+		// context (outside the txg's convergence pass), it would
+		// reintroduce exactly the race that made
+		// lethe_object_free_range require WRITER: see that function's
+		// lock comment, and the phase-A invariant note above.
 		struct ErlBox *master = __lethe_get_master_erl(spa, objset);
 		lethe_mutex_enter(&master->lock);
 		erl_mark_block(&master->erl, object);
@@ -1525,14 +1564,6 @@ struct KhtKey __lethe_object_erl_read_key(
 	uint64_t object
 ) {
 	return __lethe_object_erl_key(spa, B_TRUE, objset, object);
-}
-
-struct KhtKey __lethe_object_erl_write_key(
-	spa_t *spa,
-	uint64_t objset,
-	uint64_t object
-) {
-	return __lethe_object_erl_key(spa, B_FALSE, objset, object);
 }
 
 struct KhtKey __lethe_object_erl_key(
