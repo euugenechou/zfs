@@ -14,6 +14,7 @@
 #include <lethe/btreemap.h>
 #include <lethe/hashmap.h>
 #include <lethe/kht.h>
+#include <lethe/kht_erlbox.h>
 
 //! This file contains the API for Lethe, which, at its heart, is an efficient
 //! key management scheme designed to provide secure deletion through
@@ -265,10 +266,10 @@ void __lethe_sync_object_erlmap(spa_t *spa, dmu_tx_t *tx);
 void __lethe_sync_master_erlmap(spa_t *spa, dmu_tx_t *tx);
 
 /// General function for syncing an ERL map (`nvp`) during transaction `tx`.
-/// The ERL map is packed (under `spa->lethe_lock`, which must not already be
-/// held by the caller) and stored in the object with the specified ID
-/// (`object`) under the MOS pointed to by the `spa`. The DMU write happens
-/// with no lethe lock held.
+/// The ERL map is packed (under `spa->lethe_struct_lock`, which must not
+/// already be held by the caller) and stored in the object with the
+/// specified ID (`object`) under the MOS pointed to by the `spa`. The DMU
+/// write happens with no lethe lock held.
 void __lethe_sync_erlmap(
 	spa_t *spa,
 	dmu_tx_t *tx,
@@ -477,18 +478,6 @@ struct KhtKey lethe_bookmark_key(
 struct KhtKey lethe_bookmark_prev_key(
 	spa_t *spa,
 	const zbookmark_phys_t *bookmark
-);
-
-/// Generates a block read key from the object ERL store in the `spa` if `read`
-/// is true, otherwise it generates a block write key. The block the key is
-/// designated for is identified by object set ID (`objset`), object ID
-/// (`object`), and block ID (`block`).
-struct KhtKey __lethe_block_key(
-	spa_t *spa,
-	boolean_t read,
-	uint64_t objset,
-	uint64_t object,
-	uint64_t block
 );
 
 /// Generates the read key for the object ERL specified by the given object set

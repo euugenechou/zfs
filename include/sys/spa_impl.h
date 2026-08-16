@@ -460,11 +460,15 @@ struct spa {
         // Lethe: general fields.
 	uint64_t lethe_root_object;             // Root object.
         boolean_t lethe_root_object_loaded;     // Root object loaded?
-        boolean_t lethe_epoch_dirty;            // Epoch modifications to sync?
+        volatile uint32_t lethe_epoch_dirty;    // Epoch modifications to sync?
 
-	// One lock for all in-memory lethe state (ERL stores, maps, uber).
-	// Readers: pure key derivation (decrypt). Writers: everything else.
-	krwlock_t lethe_lock;
+	// Structure lock: READER = any key derivation or sync capture
+	// (content changes go through per-ErlBox mutexes); WRITER = anything
+	// that adds or removes ERLs (first-touch create, purge, import load).
+	// Lock order: lethe_struct_lock(R) -> object box -> master box ->
+	// lethe_uber_lock.
+	krwlock_t lethe_struct_lock;
+	kmutex_t lethe_uber_lock;               // Content lock for uber ERL.
 
 	// Lethe: uber ERL fields
 	uint64_t lethe_uber_erl_object;         // On-disk uber ERL object.
@@ -489,7 +493,7 @@ struct spa {
 
 	// Lethe: purge queue fields. On-disk ERL objects orphaned by key
 	// purging (file delete, dataset destroy); freed in lethe_sync phase B.
-	// The mutex is only ever taken alone or inside the ERL locks above.
+	// The mutex is only ever taken alone or inside lethe_struct_lock.
 	kmutex_t lethe_purge_lock;              // Lock for purge queue.
 	vec(struct LethePurgeEntry) lethe_purge_queue;  // Pending frees.
 

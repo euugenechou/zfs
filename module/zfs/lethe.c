@@ -31,8 +31,8 @@ static uint64_t DEFAULT_FANOUTS_LEN = 3;
 void lethe_init(spa_t *spa) {
 	lethe_info("lethe_init(): start\n");
 
-	// One lock for all in-memory lethe state.
-	rw_init(&spa->lethe_lock, NULL, RW_DEFAULT, NULL);
+	// Structure lock for all in-memory lethe state; content locks below.
+	rw_init(&spa->lethe_struct_lock, NULL, RW_DEFAULT, NULL);
 
 	// Initialize object ERL store fields.
 	spa->lethe_object_erlstore = hashmap_new();
@@ -54,6 +54,7 @@ void lethe_init(spa_t *spa) {
 	spa->lethe_uber_erl_object = 0;
 	spa->lethe_uber_erl_loaded = B_FALSE;
 	spa->lethe_uber_erl = erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN);
+	mutex_init(&spa->lethe_uber_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	// Initialize purge queue fields.
 	mutex_init(&spa->lethe_purge_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -62,7 +63,7 @@ void lethe_init(spa_t *spa) {
 	// Initialize general fields.
 	spa->lethe_root_object = 0;
 	spa->lethe_root_object_loaded = B_FALSE;
-	spa->lethe_epoch_dirty = B_FALSE;
+	spa->lethe_epoch_dirty = 0;
 
 	lethe_info("lethe_init(): end\n");
 }
@@ -84,9 +85,10 @@ void lethe_fini(spa_t *spa) {
 
 	// Destroy uber ERL fields.
 	erl_drop(&spa->lethe_uber_erl);
+	mutex_destroy(&spa->lethe_uber_lock);
 
-	// One lock for all in-memory lethe state.
-	rw_destroy(&spa->lethe_lock);
+	// Structure lock for all in-memory lethe state.
+	rw_destroy(&spa->lethe_struct_lock);
 
 	// Destroy purge queue fields. Entries still queued here were never
 	// drained by a sync; their on-disk objects stay orphaned (harmless:
@@ -103,7 +105,7 @@ void lethe_fini(spa_t *spa) {
 void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 	lethe_info("lethe_setup(): start\n");
 
-	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 
 	// Allocate root object and mark is as loaded.
 	spa->lethe_root_object = __lethe_alloc_root_object(spa, tx);
@@ -140,9 +142,9 @@ void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 	spa->lethe_uber_erl_loaded = B_TRUE;
 
 	// Mark epoch as dirty since we have structures to sync.
-	spa->lethe_epoch_dirty = B_TRUE;
+	spa->lethe_epoch_dirty = 1;
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 
 	lethe_info("lethe_setup(): end\n");
 }
@@ -150,7 +152,7 @@ void lethe_setup(spa_t *spa, dmu_tx_t *tx) {
 void lethe_load(spa_t *spa) {
 	lethe_info("lethe_load(): start\n");
 
-	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 
 	__lethe_load_root(spa);
 	__lethe_load_uber_erl(spa);
@@ -164,7 +166,7 @@ void lethe_load(spa_t *spa) {
 	// I/O under this lock can starve the taskq and deadlock the pool.
 	__lethe_load_all_erls(spa);
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 
 	lethe_info("lethe_load(): end\n");
 }
@@ -498,14 +500,18 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	vec(struct LetheSyncEntry) entries = vec_new();
 	vec(uint8_t) uber_bytes = vec_new();
 
-	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
-
-	// Nothing to sync if nothing was modified.
-	if (!spa->lethe_epoch_dirty) {
-		lethe_rw_exit(&spa->lethe_lock);
+	// Phase A runs under the structure lock as READER: capture only
+	// mutates ERL *contents* (through box mutexes), so concurrent
+	// derivations on untouched ERLs proceed. Clear the dirty flag
+	// FIRST: a write that lands mid-capture re-sets it and simply gets
+	// captured next epoch (its marks survive in the modified sets).
+	if (atomic_swap_32(&spa->lethe_epoch_dirty, 0) == 0) {
 		vec_drop(&entries);
+		vec_drop(&uber_bytes);
 		return;
 	}
+
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_READER);
 
 	// Capture the object ERL store first, then the master ERL store, then
 	// the uber ERL. It's imperative that the object ERLs are captured
@@ -517,20 +523,18 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 	__lethe_capture_object_erlstore(spa, &entries);
 	__lethe_capture_master_erlstore(spa, &entries);
 
+	mutex_enter(&spa->lethe_uber_lock);
 	VERIFY(spa->lethe_uber_erl_object != 0);
 	erl_patch(&spa->lethe_uber_erl);
 	erl_reset(&spa->lethe_uber_erl);
 	uber_bytes = erl_serialize(&spa->lethe_uber_erl);
+	mutex_exit(&spa->lethe_uber_lock);
 
-	// Mark that this epoch's modifications were captured. Key derivations
-	// that happen after this point dirty the next epoch.
-	spa->lethe_epoch_dirty = B_FALSE;
-
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 
 	// Phase B: allocate backing objects and write everything out with no
-	// lethe lock held. It's only re-taken briefly for the in-memory
-	// nvlist inserts/packs.
+	// lethe structure lock held. It's only re-taken briefly (WRITER) for
+	// the in-memory nvlist inserts/packs.
 	for (size_t i = 0; i < vec_len(&entries); i += 1) {
 		struct LetheSyncEntry *entry = &entries[i];
 
@@ -543,22 +547,22 @@ void lethe_sync(spa_t *spa, dmu_tx_t *tx) {
 				DMU_OTN_UINT64_METADATA
 			);
 			if (entry->is_master) {
-				lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+				lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 				VERIFY(__lethe_master_erlmap_insert(
 					spa,
 					entry->objset,
 					entry->erlobject
 				));
-				lethe_rw_exit(&spa->lethe_lock);
+				lethe_rw_exit(&spa->lethe_struct_lock);
 			} else {
-				lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+				lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 				VERIFY(__lethe_object_erlmap_insert(
 					spa,
 					entry->objset,
 					entry->object,
 					entry->erlobject
 				));
-				lethe_rw_exit(&spa->lethe_lock);
+				lethe_rw_exit(&spa->lethe_struct_lock);
 			}
 		}
 
@@ -617,11 +621,28 @@ void __lethe_capture_object_erlstore(
 	struct BTreeMapIter master_iter = btreemap_iter(&spa->lethe_master_erlstore);
 
 	while (btreemapiter_next(&master_iter, &objset, &master_box)) {
-		// Iterate over each of the modified objects.
-		uint64_t object = 0;
-		struct BTreeSetIter object_iter = btreeset_iter(&(*master_box)->erl.modified);
+		struct ErlBox *master = *master_box;
 
-		while (btreesetiter_next(&object_iter, &object)) {
+		// Snapshot the modified set under the master box mutex, then
+		// release it: the per-object work below must take the object
+		// box mutex before the master box mutex (object -> master is
+		// the sanctioned order), so it can't run with the master
+		// mutex still held.
+		vec(uint64_t) modified = vec_new();
+		lethe_mutex_enter(&master->lock);
+		{
+			uint64_t object = 0;
+			struct BTreeSetIter object_iter = btreeset_iter(&master->erl.modified);
+			while (btreesetiter_next(&object_iter, &object)) {
+				vec_push(&modified, object);
+			}
+			btreesetiter_drop(&object_iter);
+		}
+		lethe_mutex_exit(&master->lock);
+
+		for (size_t i = 0; i < vec_len(&modified); i += 1) {
+			uint64_t object = modified[i];
+
 			// A purged object (lethe_object_free) is marked under
 			// its master but its ERL is gone: there is nothing to
 			// serialize, and the master patch below rotating its
@@ -651,13 +672,25 @@ void __lethe_capture_object_erlstore(
 				));
 			}
 
+			lethe_mutex_enter(&box->lock);
+
 			// Patch the modified ERL, then reset for next epoch.
 			erl_patch(&box->erl);
 			erl_reset(&box->erl);
 
-			// Get the ERL's key, then serialize and encrypt it.
-			struct KhtKey key = __lethe_object_erl_write_key(spa, objset, object);
+			// Still holding the object box mutex (object -> master
+			// is the sanctioned order): derive the write key from
+			// the already-resident master box directly. No lazy
+			// load happens on the capture path -- masters are
+			// always resident by the time an object under them
+			// can be marked modified.
+			lethe_mutex_enter(&master->lock);
+			struct KhtKey key = erl_block_write_key(&master->erl, object);
+			lethe_mutex_exit(&master->lock);
+
 			entry.bytes = erl_serialize_keyed(&box->erl, &key);
+
+			lethe_mutex_exit(&box->lock);
 
 #if defined(__KERNEL__) && defined(DEBUG)
 			{
@@ -676,7 +709,7 @@ void __lethe_capture_object_erlstore(
 			vec_push(entries, entry);
 		}
 
-		btreesetiter_drop(&object_iter);
+		vec_drop(&modified);
 	}
 
 	btreemapiter_drop(&master_iter);
@@ -698,10 +731,15 @@ void __lethe_capture_master_erlstore(
 	struct BTreeMapIter iter = btreemap_iter(&spa->lethe_master_erlstore);
 
 	while (btreemapiter_next(&iter, &objset, &master_box)) {
+		struct ErlBox *master = *master_box;
+
+		lethe_mutex_enter(&master->lock);
+
 		// A master with no modified objects had no object ERLs
 		// captured this epoch: nothing below it changed, its slot
 		// keys are all still derivable, skip the rewrite.
-		if (btreeset_is_empty(&(*master_box)->erl.modified)) {
+		if (btreeset_is_empty(&master->erl.modified)) {
+			lethe_mutex_exit(&master->lock);
 			continue;
 		}
 
@@ -719,12 +757,15 @@ void __lethe_capture_master_erlstore(
 		}
 
 		// Patch the modified master ERL and reset it for the next epoch.
-		erl_patch(&(*master_box)->erl);
-		erl_reset(&(*master_box)->erl);
+		erl_patch(&master->erl);
+		erl_reset(&master->erl);
 
-		// Get the master ERL's key, then serialize and encrypt it.
+		// Get the master ERL's key (from the uber ERL, under its own
+		// mutex), then serialize and encrypt it.
 		struct KhtKey key = __lethe_master_erl_write_key(spa, objset);
-		entry.bytes = erl_serialize_keyed(&(*master_box)->erl, &key);
+		entry.bytes = erl_serialize_keyed(&master->erl, &key);
+
+		lethe_mutex_exit(&master->lock);
 
 #if defined(__KERNEL__) && defined(DEBUG)
 		{
@@ -806,7 +847,7 @@ void __lethe_sync_erlmap(
 ) {
 	// Pack the nvlist into contiguous memory under the lethe lock; the DMU
 	// write below must happen with no lethe lock held (see lethe_sync).
-	lethe_rw_enter(&spa->lethe_lock, RW_READER);
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_READER);
 
 	uint64_t size = 0;
 	nvlist_size(nvp, (size_t *)&size, NV_ENCODE_XDR);
@@ -814,7 +855,7 @@ void __lethe_sync_erlmap(
 	char *packed_nvp = kmem_alloc(size, KM_SLEEP);
 	nvlist_pack(nvp, &packed_nvp, (size_t *)&size, NV_ENCODE_XDR, KM_SLEEP);
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 
 	// Write to the DMU.
 	dmu_write(spa->spa_meta_objset, object, 0, size, packed_nvp, tx,
@@ -1044,7 +1085,7 @@ void __lethe_queue_purge(spa_t *spa, struct Str name, uint64_t object) {
 }
 
 void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
-	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 
 	// Drop the in-memory ERL; this also re-marks the object's slot in
 	// its master ERL, which is what makes the keys underivable after the
@@ -1066,7 +1107,10 @@ void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
 	}
 
 	// Belt and braces: if the ERL was mapped but not resident, the store
-	// removal above didn't mark the master; do it here.
+	// removal above didn't mark the master; do it here. WRITER already
+	// excludes every derivation and capture, so the box mutex isn't
+	// needed for exclusion -- taken anyway for uniformity with every
+	// other site that mutates ERL content.
 	if (removed_map && !removed_store) {
 		if (!__lethe_contains_master_erl(spa, objset)) {
 			VERIFY(__lethe_insert_master_erl(
@@ -1076,15 +1120,17 @@ void lethe_object_free(spa_t *spa, uint64_t objset, uint64_t object) {
 			));
 		}
 		struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
+		lethe_mutex_enter(&master_box->lock);
 		erl_mark_block(&master_box->erl, object);
+		lethe_mutex_exit(&master_box->lock);
 	}
 
 	if (removed_store || removed_map) {
 		lethe_info("objset: %llu, object: %llu purged\n", objset, object);
-		spa->lethe_epoch_dirty = B_TRUE;
+		spa->lethe_epoch_dirty = 1;
 	}
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 }
 
 void lethe_object_free_range(
@@ -1094,37 +1140,51 @@ void lethe_object_free_range(
 	uint64_t start,
 	uint64_t end
 ) {
-	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+	// Only marks a content range on one object ERL; nothing structural
+	// changes, so READER + the object box mutex suffices (unlike
+	// lethe_object_free/lethe_objset_destroy, which remove containers
+	// and need WRITER).
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_READER);
 
 	struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
 	if (box != NULL) {
+		lethe_mutex_enter(&box->lock);
+
 		// Only blocks the ERL has ever keyed need re-marking; freeing
 		// beyond the written extent purges nothing.
 		uint64_t clamped = end < box->erl.blocks ? end : box->erl.blocks;
+		boolean_t marked = B_FALSE;
 		if (start < clamped) {
 			for (uint64_t b = start; b < clamped; b += 1) {
 				erl_mark_block(&box->erl, b);
 			}
+			marked = B_TRUE;
+		}
 
+		lethe_mutex_exit(&box->lock);
+
+		if (marked) {
 			// The object ERL will be rewritten at sync; re-mark it
 			// under its master.
 			struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
 			VERIFY(master_box != NULL);
+			lethe_mutex_enter(&master_box->lock);
 			erl_mark_block(&master_box->erl, object);
+			lethe_mutex_exit(&master_box->lock);
 
 			lethe_info(
 				"objset: %llu, object: %llu, blocks [%llu, %llu) purged\n",
 				objset, object, start, clamped
 			);
-			spa->lethe_epoch_dirty = B_TRUE;
+			spa->lethe_epoch_dirty = 1;
 		}
 	}
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 }
 
 void lethe_objset_destroy(spa_t *spa, uint64_t objset) {
-	lethe_rw_enter(&spa->lethe_lock, RW_WRITER);
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
 
 	boolean_t purged = B_FALSE;
 
@@ -1193,13 +1253,18 @@ void lethe_objset_destroy(spa_t *spa, uint64_t objset) {
 
 	// Re-mark the objset's slot in the uber ERL: the next epoch patch
 	// makes the master ERL -- and everything keyed under it -- underivable.
+	// WRITER already excludes every derivation and capture; the uber
+	// mutex is taken anyway for uniformity with every other site that
+	// mutates ERL content.
 	if (purged) {
+		mutex_enter(&spa->lethe_uber_lock);
 		erl_mark_block(&spa->lethe_uber_erl, objset);
+		mutex_exit(&spa->lethe_uber_lock);
 		lethe_info("objset: %llu purged\n", objset);
-		spa->lethe_epoch_dirty = B_TRUE;
+		spa->lethe_epoch_dirty = 1;
 	}
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 }
 
 boolean_t __lethe_object_erlmap_contains(
@@ -1352,20 +1417,69 @@ struct KhtKey lethe_bookmark_key(
     // filesystem reclaim, hence the fstrans mark.
     fstrans_cookie_t cookie = spl_fstrans_mark();
 
-	// Reads are pure key derivation (no marking/creation/loading, since
-	// Task 4): safe to take the lock shared. Writes mark ERL slots and
-	// may create/load structures, so they still need the writer.
-	lethe_rw_enter(&spa->lethe_lock, read ? RW_READER : RW_WRITER);
+	struct KhtKey key;
+	uint64_t objset = bookmark->zb_objset;
+	uint64_t object = bookmark->zb_object;
+	uint64_t block = bookmark->zb_blkid;
 
-	struct KhtKey key = __lethe_block_key(
-		spa,
-		read,
-		bookmark->zb_objset,
-		bookmark->zb_object,
-		bookmark->zb_blkid
-	);
+retry:
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_READER);
 
-	lethe_rw_exit(&spa->lethe_lock);
+	// Eager import loading (__lethe_load_all_erls) guarantees every
+	// mapped ERL is resident, so the hot path never consults the nvlist
+	// maps and never loads (no DMU I/O under the lethe locks, by
+	// construction).
+	ASSERT(!__lethe_object_erlmap_contains(spa, objset, object) ||
+	    __lethe_contains_object_erl(spa, objset, object));
+	ASSERT(!__lethe_master_erlmap_contains(spa, objset) ||
+	    __lethe_contains_master_erl(spa, objset));
+
+	struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
+	if (box == NULL) {
+		lethe_rw_exit(&spa->lethe_struct_lock);
+		if (read) {
+			// Never keyed by lethe (or purged): random key makes
+			// the upstream MAC check fail loudly.
+			spl_fstrans_unmark(cookie);
+			return khtkey_new();
+		}
+		// First write to this object: create its ERL (and its
+		// objset's master ERL) under the structure lock, then retry.
+		lethe_rw_enter(&spa->lethe_struct_lock, RW_WRITER);
+		if (!__lethe_contains_object_erl(spa, objset, object)) {
+			__lethe_insert_object_erl(
+				spa,
+				objset,
+				object,
+				erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
+			);
+		}
+		if (!__lethe_contains_master_erl(spa, objset)) {
+			__lethe_insert_master_erl(
+				spa,
+				objset,
+				erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
+			);
+		}
+		lethe_rw_exit(&spa->lethe_struct_lock);
+		goto retry;
+	}
+
+	lethe_mutex_enter(&box->lock);
+	key = read ? erl_block_read_key(&box->erl, block)
+	           : erl_block_write_key(&box->erl, block);
+	lethe_mutex_exit(&box->lock);
+
+	if (!read) {
+		// Object box -> master box is the sanctioned order.
+		struct ErlBox *master = __lethe_get_master_erl(spa, objset);
+		lethe_mutex_enter(&master->lock);
+		erl_mark_block(&master->erl, object);
+		lethe_mutex_exit(&master->lock);
+		spa->lethe_epoch_dirty = 1;
+	}
+
+	lethe_rw_exit(&spa->lethe_struct_lock);
 
     spl_fstrans_unmark(cookie);
 
@@ -1384,7 +1498,7 @@ struct KhtKey lethe_bookmark_prev_key(
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 
 	// Lookup + erl_block_prev_key are pure after Task 3: safe as a reader.
-	lethe_rw_enter(&spa->lethe_lock, RW_READER);
+	lethe_rw_enter(&spa->lethe_struct_lock, RW_READER);
 
 	struct KhtKey key = khtkey_new();
 	struct ErlBox *box = __lethe_get_object_erl(
@@ -1393,69 +1507,16 @@ struct KhtKey lethe_bookmark_prev_key(
 		bookmark->zb_object
 	);
 	if (box != NULL) {
+		lethe_mutex_enter(&box->lock);
 		key = erl_block_prev_key(&box->erl, bookmark->zb_blkid);
+		lethe_mutex_exit(&box->lock);
 	}
 
-	lethe_rw_exit(&spa->lethe_lock);
+	lethe_rw_exit(&spa->lethe_struct_lock);
 
 	spl_fstrans_unmark(cookie);
 
 	return key;
-}
-
-struct KhtKey __lethe_block_key(
-	spa_t *spa,
-	boolean_t read,
-	uint64_t objset,
-	uint64_t object,
-	uint64_t block
-) {
-	// Eager import loading (__lethe_load_all_erls) guarantees every
-	// mapped ERL is resident, so the hot path never consults the
-	// nvlist maps and never loads (no DMU I/O under the lethe locks,
-	// by construction).
-	ASSERT(!__lethe_object_erlmap_contains(spa, objset, object) ||
-	    __lethe_contains_object_erl(spa, objset, object));
-
-	// Reads are pure: look up and derive, touching nothing. A missing
-	// ERL means lethe never keyed this block (or purged it); the
-	// random key makes the upstream MAC check fail loudly without
-	// allocating read-side state.
-	if (read) {
-		struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
-		if (box == NULL) {
-			return khtkey_new();
-		}
-		return erl_block_read_key(&box->erl, block);
-	}
-
-	// Writes create state on first touch.
-	if (!__lethe_contains_object_erl(spa, objset, object)) {
-		__lethe_insert_object_erl(
-			spa,
-			objset,
-			object,
-			erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
-		);
-	}
-	ASSERT(!__lethe_master_erlmap_contains(spa, objset) ||
-	    __lethe_contains_master_erl(spa, objset));
-	if (!__lethe_contains_master_erl(spa, objset)) {
-		__lethe_insert_master_erl(
-			spa,
-			objset,
-			erl_new(DEFAULT_FANOUTS, DEFAULT_FANOUTS_LEN)
-		);
-	}
-
-	struct ErlBox *box = __lethe_get_object_erl(spa, objset, object);
-	struct ErlBox *master_box = __lethe_get_master_erl(spa, objset);
-
-	// Mark the object as modified so its ERL is captured this epoch.
-	erl_mark_block(&master_box->erl, object);
-	spa->lethe_epoch_dirty = B_TRUE;
-
-	return erl_block_write_key(&box->erl, block);
 }
 
 struct KhtKey __lethe_object_erl_read_key(
@@ -1504,8 +1565,11 @@ struct KhtKey __lethe_master_erl_key(
 	boolean_t read,
 	uint64_t objset
 ) {
-	return read ? erl_block_read_key(&spa->lethe_uber_erl, objset)
-	            : erl_block_write_key(&spa->lethe_uber_erl, objset);
+	mutex_enter(&spa->lethe_uber_lock);
+	struct KhtKey key = read ? erl_block_read_key(&spa->lethe_uber_erl, objset)
+	                         : erl_block_write_key(&spa->lethe_uber_erl, objset);
+	mutex_exit(&spa->lethe_uber_lock);
+	return key;
 }
 
 void lethe_hijack_dsl_crypto_key(dsl_crypto_key_t *dck, struct KhtKey *key) {

@@ -1,6 +1,15 @@
 #pragma once
 
 #ifdef __KERNEL__
+    // <sys/mutex.h> is the SPL's header: it redefines mutex_init as a
+    // 4-argument macro with no reverse-order guard. Any translation unit
+    // that includes this header must first include whatever Linux kernel
+    // headers it needs that themselves call the kernel's own single-argument
+    // mutex_init() (e.g. in inline function bodies pulled in transitively by
+    // linux/mmzone.h) -- once the SPL macro is visible, those single-argument
+    // callers fail to compile. lethe.h orders its includes this way
+    // deliberately; preserve that order in any new translation unit that
+    // reaches this header.
     #include <lethe/kht_erl.h>
     #include <sys/debug.h>
     #include <sys/mutex.h>
