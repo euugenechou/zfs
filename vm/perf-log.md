@@ -152,3 +152,68 @@ reader/writer-mixing fio deadlock reproducer completed cleanly (exit 0,
 not the 124-timeout that would indicate a hang) against the single
 shared `spa->lethe_lock`, with decrypt-side derivations taking it
 `RW_READER` and encrypt/write/purge/sync taking it `RW_WRITER`.
+
+## Step C: per-erl locking (commit 32207f534)
+
+```
+### randread jobs=1
+perf: (groupid=0, jobs=1): err= 0: pid=508160: Sat Aug 15 17:18:14 2026
+   READ: bw=9583MiB/s (10.0GB/s), 9583MiB/s-9583MiB/s (10.0GB/s-10.0GB/s), io=281GiB (301GB), run=30001-30001msec
+### randrw jobs=1
+perf: (groupid=0, jobs=1): err= 0: pid=508178: Sat Aug 15 17:18:44 2026
+   READ: bw=139MiB/s (146MB/s), 139MiB/s-139MiB/s (146MB/s-146MB/s), io=4179MiB (4382MB), run=30003-30003msec
+  WRITE: bw=140MiB/s (146MB/s), 140MiB/s-140MiB/s (146MB/s-146MB/s), io=4188MiB (4392MB), run=30003-30003msec
+### randread jobs=2
+perf: (groupid=0, jobs=2): err= 0: pid=508200: Sat Aug 15 17:19:16 2026
+   READ: bw=18.0GiB/s (19.3GB/s), 18.0GiB/s-18.0GiB/s (19.3GB/s-19.3GB/s), io=539GiB (579GB), run=30002-30002msec
+### randrw jobs=2
+perf: (groupid=0, jobs=2): err= 0: pid=508215: Sat Aug 15 17:19:47 2026
+   READ: bw=102MiB/s (106MB/s), 102MiB/s-102MiB/s (106MB/s-106MB/s), io=3051MiB (3199MB), run=30052-30052msec
+  WRITE: bw=102MiB/s (107MB/s), 102MiB/s-102MiB/s (107MB/s-107MB/s), io=3070MiB (3219MB), run=30052-30052msec
+### randread jobs=4
+perf: (groupid=0, jobs=4): err= 0: pid=508254: Sat Aug 15 17:20:20 2026
+   READ: bw=25.4GiB/s (27.3GB/s), 25.4GiB/s-25.4GiB/s (27.3GB/s-27.3GB/s), io=763GiB (820GB), run=30003-30003msec
+### randrw jobs=4
+perf: (groupid=0, jobs=4): err= 0: pid=508282: Sat Aug 15 17:20:50 2026
+   READ: bw=110MiB/s (116MB/s), 110MiB/s-110MiB/s (116MB/s-116MB/s), io=3362MiB (3525MB), run=30449-30449msec
+  WRITE: bw=112MiB/s (117MB/s), 112MiB/s-112MiB/s (117MB/s-117MB/s), io=3411MiB (3577MB), run=30449-30449msec
+### randread jobs=8
+perf: (groupid=0, jobs=8): err= 0: pid=508306: Sat Aug 15 17:21:26 2026
+   READ: bw=24.0GiB/s (25.7GB/s), 24.0GiB/s-24.0GiB/s (25.7GB/s-25.7GB/s), io=719GiB (772GB), run=30001-30001msec
+### randrw jobs=8
+perf: (groupid=0, jobs=8): err= 0: pid=508331: Sat Aug 15 17:21:56 2026
+   READ: bw=124MiB/s (130MB/s), 124MiB/s-124MiB/s (130MB/s-130MB/s), io=3712MiB (3892MB), run=30007-30007msec
+  WRITE: bw=126MiB/s (132MB/s), 126MiB/s-126MiB/s (132MB/s-132MB/s), io=3771MiB (3954MB), run=30007-30007msec
+```
+
+`randread` is still ARC-inflated for the reasons noted above. `randrw`
+is the step-over-step metric. Paired table, READ/WRITE MiB/s by jobs,
+baseline/step0/stepA/stepC:
+
+| jobs | baseline READ | baseline WRITE | step0 READ | step0 WRITE | stepA READ | stepA WRITE | stepC READ | stepC WRITE |
+|-----:|---------------:|----------------:|------------:|-------------:|------------:|-------------:|------------:|-------------:|
+| 1    | 141            | 141              | 139         | 140          | 140         | 140          | 139         | 140          |
+| 2    | 101            | 102              | 102         | 103          | 103         | 104          | 102         | 102          |
+| 4    | 118            | 119              | 119         | 120          | 117         | 119          | 110         | 112          |
+| 8    | 119            | 121              | 123         | 125          | 124         | 126          | 124         | 126          |
+
+jobs=1, 2, and 8 hold within noise of stepA (within a couple MiB/s, same
+shape as prior step-over-step comparisons); jobs=8 matches stepA exactly
+and both beat baseline. jobs=4 is the one outlier: stepC's 110/112 is
+~6% below stepA's 117/119 and baseline's 118/119 -- under the 10%
+flag threshold in the validation plan, but the only point in this run
+that regressed rather than held. Plausible causes given the changes in
+this step: the per-ErlBox mutex enter/exit pairs added to the hot path
+(`lethe_bookmark_key`'s box lock plus, on every write, a second master
+box lock) and to phase-A capture add real (if small) per-operation
+overhead that a single shared rwlock didn't have, and this workload's
+mixed read/write pattern exercises exactly that write-side hot path.
+A single 30s sample at jobs=4 isn't enough to separate that from rig
+noise (jobs=1/2/8 in the same run show no such dip), so this is flagged
+here rather than treated as a settled regression; worth a repeat run
+if this step is revisited. The result this step is chasing is
+structural, not this benchmark: `randrw` at this iodepth was never
+lock-contention-bound (see stepA's note above), so the scoped structure
+lock's payoff is in reducing reader/writer exclusion under real
+concurrent load (the gauntlet's mixed workloads), not in this
+single-threaded-per-job fio shape.
